@@ -9,7 +9,7 @@ pub use crate::pcs::{
     errors::PCSError,
     mulcs::{
         srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
-        MulcsBatchProof, MulcsPCS, MulcsProof,
+        MulcsPCS, MulcsProof,
     },
     multilinear_kzg::{
         batching::BatchProof,

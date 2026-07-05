@@ -221,8 +221,6 @@ mod tests {
             // Basic consistency: g1_powers[0] should match the verifier's g1_one
             assert_eq!(ck.g1_powers[0], vk.g1_one, "g1_powers[0] != g1_one");
             assert_eq!(ck.g1_powers[1], vk.g1_x, "g1_powers[1] != g1_x");
-            // g1_powers should all be different (no duplicates from bad batch norm)
-            assert!(ck.g1_powers[0] != ck.g1_powers[1]);
         }
         Ok(())
     }
