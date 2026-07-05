@@ -65,6 +65,19 @@ where
     >,
 {
     let open_timer = start_timer!(|| format!("multi open {} points", points.len()));
+    if polynomials.is_empty() {
+        return Err(PCSError::InvalidParameters(
+            "empty polynomial list".to_string(),
+        ));
+    }
+    if polynomials.len() != points.len() || polynomials.len() != evals.len() {
+        return Err(PCSError::InvalidParameters(format!(
+            "batch opening length mismatch: polynomials={}, points={}, evals={}",
+            polynomials.len(),
+            points.len(),
+            evals.len()
+        )));
+    }
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
@@ -72,8 +85,24 @@ where
         transcript.append_field_element(b"eval", eval)?;
     }
 
-    // TODO: sanity checks
     let num_var = polynomials[0].num_vars;
+    for poly in polynomials {
+        if poly.num_vars != num_var {
+            return Err(PCSError::InvalidParameters(format!(
+                "inconsistent num_vars: {} vs {}",
+                poly.num_vars, num_var
+            )));
+        }
+    }
+    for point in points {
+        if point.len() != num_var {
+            return Err(PCSError::InvalidParameters(format!(
+                "point length {} != num_vars {}",
+                point.len(),
+                num_var
+            )));
+        }
+    }
     let k = polynomials.len();
     let ell = log2(k) as usize;
 
@@ -81,7 +110,11 @@ where
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
 
     // eq(t, i) for i in [0..k]
-    let eq_t_i_list = build_eq_x_r_vec(t.as_ref())?;
+    let eq_t_i_list = if ell == 0 {
+        vec![E::ScalarField::one()]
+    } else {
+        build_eq_x_r_vec(t.as_ref())?
+    };
 
     // \tilde g_i(b) = eq(t, i) * f_i(b)
     let timer = start_timer!(|| format!("compute tilde g for {} points", points.len()));
@@ -204,14 +237,25 @@ where
     >,
 {
     let open_timer = start_timer!(|| "batch verification");
+    if f_i_commitments.is_empty() {
+        return Err(PCSError::InvalidProof("empty batch proof".to_string()));
+    }
+    if f_i_commitments.len() != points.len()
+        || f_i_commitments.len() != proof.f_i_eval_at_point_i.len()
+    {
+        return Err(PCSError::InvalidProof(format!(
+            "batch verification length mismatch: commitments={}, points={}, evals={}",
+            f_i_commitments.len(),
+            points.len(),
+            proof.f_i_eval_at_point_i.len()
+        )));
+    }
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
     for eval in proof.f_i_eval_at_point_i.iter() {
         transcript.append_field_element(b"eval", eval)?;
     }
-
-    // TODO: sanity checks
 
     let k = f_i_commitments.len();
     let ell = log2(k) as usize;
@@ -225,7 +269,11 @@ where
 
     // build g' commitment
     let step = start_timer!(|| "build homomorphic commitment");
-    let eq_t_list = build_eq_x_r_vec(t.as_ref())?;
+    let eq_t_list = if ell == 0 {
+        vec![E::ScalarField::one()]
+    } else {
+        build_eq_x_r_vec(t.as_ref())?
+    };
 
     let mut scalars = vec![];
     let mut bases = vec![];

@@ -1,11 +1,15 @@
 //! Mulcs PCS implementation — Claymore identity-based multilinear PCS
 //! using univariate KZG as the black-box commitment scheme.
 //!
-//! Batch opening: same-point openings are combined via Fiat-Shamir random
-//! combination before generating a single Mulcs proof per group, reducing
-//! the number of h̄ commitments and KZG quotients.
+//! Batch opening: reuse the sumcheck-based multi-point batching used by mKZG.
+//! Multiple openings at different points are reduced to one opening of an
+//! aggregated polynomial `g'` at the sumcheck point.
 
 use crate::pcs::{
+    multilinear_kzg::batching::{
+        batch_verify_internal as sumcheck_batch_verify_internal,
+        multi_open_internal as sumcheck_multi_open_internal, BatchProof as SumcheckBatchProof,
+    },
     prelude::{Commitment, PCSError},
     HasEvals, PolynomialCommitmentScheme, StructuredReferenceString,
 };
@@ -96,7 +100,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
     type Evaluation = E::ScalarField;
     type Commitment = Commitment<E>;
     type Proof = MulcsProof<E>;
-    type BatchProof = MulcsBatchProof<E>;
+    type BatchProof = SumcheckBatchProof<E, Self>;
 
     fn gen_srs_for_testing<R: Rng>(
         rng: &mut R,
@@ -209,8 +213,8 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
         points: &[Self::Point],
         evals: &[Self::Evaluation],
         transcript: &mut IOPTranscript<E::ScalarField>,
-    ) -> Result<MulcsBatchProof<E>, PCSError> {
-        multi_open_internal(
+    ) -> Result<Self::BatchProof, PCSError> {
+        sumcheck_multi_open_internal::<E, Self>(
             prover_param.borrow(),
             polynomials,
             points,
@@ -236,7 +240,13 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
         batch_proof: &Self::BatchProof,
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
-        batch_verify_internal(verifier_param, commitments, points, batch_proof, transcript)
+        sumcheck_batch_verify_internal::<E, Self>(
+            verifier_param,
+            commitments,
+            points,
+            batch_proof,
+            transcript,
+        )
     }
 }
 
@@ -303,6 +313,7 @@ fn mulcs_batch_kzg_open<E: Pairing>(
 
 // ─── multi_open_internal (group-based) ───────────────────────────
 
+#[allow(dead_code)]
 pub(crate) fn multi_open_internal<E: Pairing>(
     pp: &MulcsProverParam<E>,
     polynomials: &[Arc<DenseMultilinearExtension<E::ScalarField>>],
@@ -613,6 +624,7 @@ pub(crate) fn multi_open_internal<E: Pairing>(
 
 // ─── batch_verify_internal (group-based) ─────────────────────────
 
+#[allow(dead_code)]
 pub(crate) fn batch_verify_internal<E: Pairing>(
     vp: &MulcsVerifierParam<E>,
     commitments: &[Commitment<E>],
@@ -1037,9 +1049,7 @@ mod tests {
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
         let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        assert_eq!(proof.num_groups, 1, "all same point should produce 1 group");
-        assert_eq!(proof.cm_hbars.len(), 1);
-        assert_eq!(proof.mulcs_evals.len(), 1);
+        assert_eq!(proof.evals(), evals.as_slice());
 
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
@@ -1077,9 +1087,7 @@ mod tests {
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
         let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        assert_eq!(proof.num_groups, 2);
-        assert_eq!(proof.cm_hbars.len(), 2);
-        assert_eq!(proof.group_sizes, vec![2, 3]);
+        assert_eq!(proof.evals(), evals.as_slice());
 
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
@@ -1104,7 +1112,7 @@ mod tests {
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
         let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        assert_eq!(proof.num_groups, 1);
+        assert_eq!(proof.evals(), evals.as_slice());
 
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
@@ -1143,9 +1151,10 @@ mod tests {
         let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &wrong_evals, &mut tp)?;
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
-        assert!(!MulcsPCS::<E>::batch_verify(
-            &vk, &comms, &points, &proof, &mut tv
-        )?);
+        assert_rejects(
+            "wrong_eval_same_point",
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv),
+        );
         Ok(())
     }
 
@@ -1233,9 +1242,10 @@ mod tests {
         let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &wrong_evals, &mut tp)?;
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
-        assert!(!MulcsPCS::<E>::batch_verify(
-            &vk, &comms, &points, &proof, &mut tv
-        )?);
+        assert_rejects(
+            "wrong_claimed_eval",
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv),
+        );
         Ok(())
     }
 
@@ -1262,13 +1272,10 @@ mod tests {
         wrong_points[0] = random_point(nv, &mut rng);
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
-        assert!(!MulcsPCS::<E>::batch_verify(
-            &vk,
-            &comms,
-            &wrong_points,
-            &proof,
-            &mut tv
-        )?);
+        assert_rejects(
+            "wrong_point",
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &wrong_points, &proof, &mut tv),
+        );
         Ok(())
     }
 
@@ -1330,45 +1337,11 @@ mod tests {
         tv.append_field_element(b"init", &Fr::ZERO)?;
         let r = MulcsPCS::<E>::batch_verify(&vk, short, &points, &proof, &mut tv);
         assert!(r.is_err() || !r.unwrap());
-        proof.num_openings = 0;
+        proof.f_i_eval_at_point_i.pop();
         let mut tv2 = IOPTranscript::new(b"test");
         tv2.append_field_element(b"init", &Fr::ZERO)?;
         let r2 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv2);
         assert!(r2.is_err() || !r2.unwrap());
-
-        // Tamper: group_sizes.len() != num_groups
-        let mut proof2 = MulcsPCS::<E>::multi_open(
-            &ck,
-            &polys,
-            &points,
-            &evals,
-            &mut IOPTranscript::new(b"t2"),
-        )?;
-        proof2.group_sizes.pop(); // too few
-        let mut tv3 = IOPTranscript::new(b"test");
-        tv3.append_field_element(b"init", &Fr::ZERO)?;
-        let r3 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof2, &mut tv3);
-        assert!(
-            r3.is_err() || !r3.unwrap(),
-            "should reject group_sizes too short"
-        );
-
-        // Tamper: num_groups changed
-        let mut proof3 = MulcsPCS::<E>::multi_open(
-            &ck,
-            &polys,
-            &points,
-            &evals,
-            &mut IOPTranscript::new(b"t3"),
-        )?;
-        proof3.num_groups = 99;
-        let mut tv4 = IOPTranscript::new(b"test");
-        tv4.append_field_element(b"init", &Fr::ZERO)?;
-        let r4 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof3, &mut tv4);
-        assert!(
-            r4.is_err() || !r4.unwrap(),
-            "should reject wrong num_groups"
-        );
 
         Ok(())
     }
@@ -1445,59 +1418,5 @@ mod tests {
             Ok(false) => {}, // ok
             Err(_e) => {},   // ok
         }
-    }
-
-    #[test]
-    fn test_mulcs_batch_verify_rejects_group_sizes_too_long() -> Result<(), PCSError> {
-        let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
-        let evals: Vec<Fr> = polys
-            .iter()
-            .zip(points.iter())
-            .map(|(p, pt)| p.evaluate(pt).unwrap())
-            .collect();
-        let comms: Vec<_> = polys
-            .iter()
-            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
-            .collect();
-        let mut tp = IOPTranscript::new(b"test");
-        let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        // group_sizes.len() > num_groups
-        proof.group_sizes.push(1);
-        let mut tv = IOPTranscript::new(b"test");
-        tv.append_field_element(b"init", &Fr::ZERO)?;
-        let r = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv);
-        assert_rejects("group_sizes_too_long", r);
-        Ok(())
-    }
-
-    #[test]
-    fn test_mulcs_batch_verify_rejects_group_sizes_sum_mismatch() -> Result<(), PCSError> {
-        let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
-        let evals: Vec<Fr> = polys
-            .iter()
-            .zip(points.iter())
-            .map(|(p, pt)| p.evaluate(pt).unwrap())
-            .collect();
-        let comms: Vec<_> = polys
-            .iter()
-            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
-            .collect();
-        let mut tp = IOPTranscript::new(b"test");
-        let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        // group_sizes sum == num_openings (3) but len (1) != num_groups (3)
-        proof.group_sizes = vec![3];
-        let mut tv = IOPTranscript::new(b"test");
-        tv.append_field_element(b"init", &Fr::ZERO)?;
-        let r = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv);
-        assert_rejects("group_sizes_sum_ok_len_mismatch", r);
-        Ok(())
     }
 }
