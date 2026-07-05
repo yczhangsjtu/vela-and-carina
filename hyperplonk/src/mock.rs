@@ -214,6 +214,7 @@ mod test {
     }
 
     #[test]
+    #[ignore = "benchmark: run with cargo test --release bench_hyperplonk_timed -- --ignored --nocapture"]
     fn bench_hyperplonk_timed() -> Result<(), HyperPlonkErrors> {
         use std::time::Instant;
         let mut rng = test_rng();

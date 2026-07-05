@@ -1,5 +1,6 @@
 //! Minimal HyperPlonk benchmark — vanilla Plonk gate, single repetition.
-//! Run with: cargo test --release hp_vanilla -- --nocapture
+//! This test is `#[ignore]` and does not run in default `cargo test`.
+//! Run with: cargo test --release hp_vanilla -- --ignored --nocapture
 
 #[cfg(test)]
 mod tests {
@@ -16,6 +17,7 @@ mod tests {
     };
 
     #[test]
+    #[ignore = "benchmark: run with cargo test --release hp_vanilla -- --ignored --nocapture"]
     fn hp_vanilla() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let srs = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, 16)?;

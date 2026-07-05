@@ -6,7 +6,6 @@
 
 use crate::pcs::{prelude::PCSError, StructuredReferenceString};
 use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
-use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
 

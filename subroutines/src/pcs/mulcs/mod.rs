@@ -404,6 +404,29 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
 ) -> Result<bool, PCSError> {
     let open_timer = start_timer!(|| "mulcs batch verify");
 
+    // ── Length sanity checks (return false / error, never panic) ──
+    let num_polys = proof.num_polys;
+    if commitments.len() != num_polys
+        || points.len() != num_polys
+        || proof.f_i_eval_at_point_i.len() != num_polys
+        || proof.cm_hbars.len() != num_polys
+        || proof.mulcs_evals.len() != num_polys
+    {
+        return Err(PCSError::InvalidProof(
+            "length mismatch in batch proof".to_string(),
+        ));
+    }
+
+    for point in points {
+        if point.len() != proof.mu {
+            return Err(PCSError::InvalidProof(format!(
+                "point length {} != mu {}",
+                point.len(),
+                proof.mu
+            )));
+        }
+    }
+
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
@@ -411,9 +434,6 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         transcript.append_field_element(b"eval", eval)?;
     }
 
-    let num_polys = proof.num_polys;
-    let _n = 1 << proof.mu;
-    let _mu = proof.mu;
     let gamma = vp.gamma;
 
     for cm_hbar in &proof.cm_hbars {
@@ -423,7 +443,7 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     let z_buf = transcript.get_and_append_challenge_vectors(b"z", 1)?;
     let z = z_buf[0];
     if z != proof.z {
-        return Err(PCSError::InvalidProof("z mismatch".to_string()));
+        return Ok(false);
     }
 
     let gz = gamma * z;
@@ -439,6 +459,7 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     let outer_r_buf = transcript.get_and_append_challenge_vectors(b"outer", 1)?;
     let outer_r = outer_r_buf[0];
 
+    // ── Aggregated KZG pairing check ──
     let mut cm_combined = E::G1::zero();
     let mut outer_r_pow = E::ScalarField::one();
 
@@ -452,7 +473,7 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         let (rf, _) = build_multi_point_polys(&f_pts);
         let (rh, _) = build_multi_point_polys(&h_pts);
 
-        let mut r_comb = vec![E::ScalarField::zero(); 2];
+        let mut r_comb = vec![E::ScalarField::ZERO; 2];
         for j in 0..2 {
             r_comb[j] = rf[j] + inner_r * rh[j];
         }
@@ -467,11 +488,35 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
 
     let zx_g2 = vp.g2_x2.into_group() - vp.g2_x.into_group() * s + vp.g2_one.into_group() * p;
 
-    let ok = E::pairing(cm_combined.into_affine(), vp.g2_one)
-        == E::pairing(proof.pi, zx_g2.into_affine());
+    if E::pairing(cm_combined.into_affine(), vp.g2_one) != E::pairing(proof.pi, zx_g2.into_affine())
+    {
+        end_timer!(open_timer);
+        return Ok(false);
+    }
+
+    // ── Per-polynomial Claymore identity checks ──
+    for i in 0..num_polys {
+        let (y_f, _y_f_prime, _y_h, y_h_prime) = proof.mulcs_evals[i];
+        let y_hbar = proof.mulcs_evals[i].2; // index 2 = y_h
+
+        let ok = check_claymore_identity(
+            gamma,
+            proof.mu,
+            z,
+            y_f,
+            y_hbar,
+            y_h_prime,
+            &points[i],
+            proof.f_i_eval_at_point_i[i],
+        )?;
+        if !ok {
+            end_timer!(open_timer);
+            return Ok(false);
+        }
+    }
 
     end_timer!(open_timer);
-    Ok(ok)
+    Ok(true)
 }
 
 fn verify_internal<E: Pairing>(
@@ -481,15 +526,13 @@ fn verify_internal<E: Pairing>(
     value: &E::ScalarField,
     proof: &MulcsProof<E>,
 ) -> Result<bool, PCSError> {
-    let n = 1 << proof.mu;
-    let _mu = proof.mu;
     let gamma = vp.gamma;
     let gz = gamma * proof.z;
 
-    // KZG batch verify: f_v and h̄ at (z, γz)
+    // KZG pairing check: f_v and h̄ at (z, γz)
     let f_pts = [(proof.z, proof.y_f), (gz, proof.y_f_prime)];
     let h_pts = [(proof.z, proof.y_hbar), (gz, proof.y_hbar_prime)];
-    let (rf, _z_coeffs) = build_multi_point_polys(&f_pts);
+    let (rf, _) = build_multi_point_polys(&f_pts);
     let (rh, _) = build_multi_point_polys(&h_pts);
 
     let mut r_comb = vec![E::ScalarField::zero(); 2];
@@ -507,26 +550,53 @@ fn verify_internal<E: Pairing>(
         return Ok(false);
     }
 
-    // Claymore identity check
-    let z_inv = proof
-        .z
+    check_claymore_identity(
+        gamma,
+        proof.mu,
+        proof.z,
+        proof.y_f,
+        proof.y_hbar,
+        proof.y_hbar_prime,
+        point,
+        *value,
+    )
+}
+
+// ─── Claymore identity check (shared between single and batch verify) ──
+
+/// Verify the Claymore identity for a single opening:
+///
+///   γ^{N-1}·h̄(z) - h̄(γz) == z^{N-1}·(f_v(z)·eq(r, z⁻¹) - claimed_value)
+///
+/// Returns `Ok(true)` if the identity holds.
+fn check_claymore_identity<F: Field>(
+    gamma: F,
+    mu: usize,
+    z: F,
+    y_f: F,
+    y_hbar: F,
+    y_hbar_prime: F,
+    point: &[F],
+    claimed_value: F,
+) -> Result<bool, PCSError> {
+    let n = 1 << mu;
+
+    let z_inv = z
         .inverse()
         .ok_or_else(|| PCSError::InvalidParameters("z is zero".to_string()))?;
 
-    let mut y_r = E::ScalarField::one();
+    let mut y_r = F::one();
     let mut z_pow = z_inv;
     for rk in point.iter() {
-        y_r *= (E::ScalarField::one() - *rk) + *rk * z_pow;
+        y_r *= (F::one() - *rk) + *rk * z_pow;
         z_pow = z_pow.square();
     }
 
     let gamma_n1 = gamma.pow([(n - 1) as u64]);
-    let z_n1 = proof.z.pow([(n - 1) as u64]);
+    let z_n1 = z.pow([(n - 1) as u64]);
 
-    Ok(gamma_n1 * proof.y_hbar - proof.y_hbar_prime == z_n1 * (proof.y_f * y_r - *value))
+    Ok(gamma_n1 * y_hbar - y_hbar_prime == z_n1 * (y_f * y_r - claimed_value))
 }
-
-// ─── Polynomial utilities for multi-point opening ──────────────────
 
 fn build_multi_point_polys<F: Field>(points: &[(F, F)]) -> (Vec<F>, Vec<F>) {
     let k = points.len();
@@ -671,4 +741,185 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_mulcs_multi_open_rejects_wrong_claimed_eval() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let num_polys = 3;
+        let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let (ck, vk) = MulcsPCS::<E>::trim(&srs, None, Some(nv))?;
+
+        let polys: Vec<Arc<DenseMultilinearExtension<Fr>>> = (0..num_polys)
+            .map(|_| Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)))
+            .collect();
+        let points: Vec<Vec<Fr>> = (0..num_polys)
+            .map(|_| (0..nv).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>())
+            .collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<Commitment<E>> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+
+        let mut wrong_evals = evals.clone();
+        wrong_evals[0] += Fr::ONE; // tamper: wrong claimed eval
+
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let batch_proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &wrong_evals, &mut tp)?;
+
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        assert!(
+            !MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &batch_proof, &mut tv)?,
+            "should reject wrong claimed eval"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_wrong_point() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let num_polys = 3;
+        let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let (ck, vk) = MulcsPCS::<E>::trim(&srs, None, Some(nv))?;
+
+        let polys: Vec<Arc<DenseMultilinearExtension<Fr>>> = (0..num_polys)
+            .map(|_| Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)))
+            .collect();
+        let points: Vec<Vec<Fr>> = (0..num_polys)
+            .map(|_| (0..nv).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>())
+            .collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<Commitment<E>> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let batch_proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+
+        let mut wrong_points = points.clone();
+        wrong_points[0][0] += Fr::ONE; // tamper: wrong point
+
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        assert!(
+            !MulcsPCS::<E>::batch_verify(&vk, &comms, &wrong_points, &batch_proof, &mut tv)?,
+            "should reject wrong point"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_wrong_commitment() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let num_polys = 3;
+        let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let (ck, vk) = MulcsPCS::<E>::trim(&srs, None, Some(nv))?;
+
+        let polys: Vec<Arc<DenseMultilinearExtension<Fr>>> = (0..num_polys)
+            .map(|_| Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)))
+            .collect();
+        let points: Vec<Vec<Fr>> = (0..num_polys)
+            .map(|_| (0..nv).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>())
+            .collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<Commitment<E>> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let batch_proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+
+        let extra_poly = Arc::new(DenseMultilinearExtension::rand(nv, &mut rng));
+        let extra_com = MulcsPCS::<E>::commit(&ck, &extra_poly)?;
+        let mut wrong_comms = comms.clone();
+        wrong_comms[0] = extra_com; // tamper: wrong commitment
+
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        assert!(
+            !MulcsPCS::<E>::batch_verify(&vk, &wrong_comms, &points, &batch_proof, &mut tv)?,
+            "should reject wrong commitment"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_batch_verify_rejects_malformed_lengths() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let num_polys = 3;
+        let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let (ck, vk) = MulcsPCS::<E>::trim(&srs, None, Some(nv))?;
+
+        let polys: Vec<Arc<DenseMultilinearExtension<Fr>>> = (0..num_polys)
+            .map(|_| Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)))
+            .collect();
+        let points: Vec<Vec<Fr>> = (0..num_polys)
+            .map(|_| (0..nv).map(|_| Fr::rand(&mut rng)).collect::<Vec<_>>())
+            .collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<Commitment<E>> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let mut batch_proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+
+        // Malform: remove one commitment from verifier's list
+        let short_comms = &comms[..2];
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        let result = MulcsPCS::<E>::batch_verify(&vk, short_comms, &points, &batch_proof, &mut tv);
+        assert!(
+            result.is_err() || !result.unwrap(),
+            "should reject malformed batch proof (wrong num commitments)"
+        );
+
+        // Malform: shorten cm_hbars
+        let wrong_num = batch_proof.num_polys - 1;
+        batch_proof.num_polys = 0; // clearly wrong
+        let mut tv2 = IOPTranscript::new(b"test");
+        tv2.append_field_element(b"init", &Fr::ZERO)?;
+        let result2 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &batch_proof, &mut tv2);
+        assert!(
+            result2.is_err() || !result2.unwrap(),
+            "should reject malformed batch proof (wrong num_polys)"
+        );
+        batch_proof.num_polys = wrong_num; // restore to trigger length mismatch
+        let mut tv3 = IOPTranscript::new(b"test");
+        tv3.append_field_element(b"init", &Fr::ZERO)?;
+        let result3 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &batch_proof, &mut tv3);
+        assert!(
+            result3.is_err() || !result3.unwrap(),
+            "should reject malformed batch proof (length mismatch)"
+        );
+
+        Ok(())
+    }
 }
