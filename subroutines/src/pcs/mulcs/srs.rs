@@ -1,14 +1,17 @@
 //! Structured Reference String for Mulcs PCS.
 //!
 //! Wraps univariate KZG SRS. SRS generation is for testing only.
-//! Uses a random field element as the structured randomness γ for
-//! the Claymore identity.
+//! Uses FixedBase MSM for G1 powers generation (same approach as mKZG).
 
 use crate::pcs::{mulcs::profile::ScopedTimer, prelude::PCSError, StructuredReferenceString};
-use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
+use ark_ec::{
+    pairing::Pairing,
+    scalar_mul::{fixed_base::FixedBase, variable_base::VariableBaseMSM},
+    CurveGroup,
+};
+use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
-use rayon::prelude::*;
 
 /// Universal parameters for Mulcs PCS. Contains prover G1 powers
 /// up to `max_degree` and verifier G2 elements.
@@ -117,7 +120,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         let max_degree = 2 * (1 << supported_num_vars); // 2N
         let n = 1 << supported_num_vars;
 
-        // Total timer — covers everything including pp/vp construction
+        // Total timer
         let _t_total = ScopedTimer::new(
             supported_num_vars,
             n,
@@ -149,18 +152,19 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         }
         drop(_t1);
 
-        // Phase: compute G1 powers (parallel scalar multiplication)
+        // Phase: compute G1 powers using FixedBase MSM (same approach as mKZG SRS)
         let _t2 = ScopedTimer::new(
             supported_num_vars,
             n,
             "srs_gen_g1_powers",
             max_degree + 1,
-            "G1-scalar-mult-par",
+            "G1-fixed-base-msm",
         );
-        let g1_powers: Vec<E::G1Affine> = x_pows
-            .par_iter()
-            .map(|&xi| (g1 * xi).into_affine())
-            .collect();
+        let scalar_bits = E::ScalarField::MODULUS_BIT_SIZE as usize;
+        let window_size = FixedBase::get_mul_window_size(max_degree + 1);
+        let g1_table = FixedBase::get_window_table(scalar_bits, window_size, g1);
+        let g1_projective = FixedBase::msm(scalar_bits, window_size, &g1_table, &x_pows);
+        let g1_powers: Vec<E::G1Affine> = E::G1::normalize_batch(&g1_projective);
         drop(_t2);
 
         // Phase: compute G2 elements
@@ -213,7 +217,12 @@ mod tests {
         let mut rng = test_rng();
         for nv in 4..10 {
             let srs = MulcsUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
-            let (_ck, _vk) = srs.trim(2 * (1 << nv))?;
+            let (ck, vk) = srs.trim(2 * (1 << nv))?;
+            // Basic consistency: g1_powers[0] should match the verifier's g1_one
+            assert_eq!(ck.g1_powers[0], vk.g1_one, "g1_powers[0] != g1_one");
+            assert_eq!(ck.g1_powers[1], vk.g1_x, "g1_powers[1] != g1_x");
+            // g1_powers should all be different (no duplicates from bad batch norm)
+            assert!(ck.g1_powers[0] != ck.g1_powers[1]);
         }
         Ok(())
     }

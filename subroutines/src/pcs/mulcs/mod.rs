@@ -1439,11 +1439,11 @@ mod tests {
         assert!(r.is_err(), "should reject point.len() != nv");
     }
 
-    fn assert_rejects(backend: &str, result: Result<bool, PCSError>) {
+    fn assert_rejects(_backend: &str, result: Result<bool, PCSError>) {
         match result {
-            Ok(true) => panic!("{backend}: expected reject but got true"),
+            Ok(true) => panic!("expected reject but got true"),
             Ok(false) => {}, // ok
-            Err(e) => eprintln!("# {backend} reject with error: {e:?}"),
+            Err(_e) => {},   // ok
         }
     }
 
@@ -1492,10 +1492,8 @@ mod tests {
             .collect();
         let mut tp = IOPTranscript::new(b"test");
         let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        // group_sizes sum == num_openings but len != num_groups: add extra entry
-        proof.group_sizes = vec![2, 1]; // correct lengths, same num_groups → should pass
-        proof.group_sizes = vec![2]; // wrong: len=1 != num_groups=3 (but sum=2 != num_openings=3)
-        proof.group_sizes = vec![3]; // len=1 != num_groups=3, sum=3 == num_openings=3
+        // group_sizes sum == num_openings (3) but len (1) != num_groups (3)
+        proof.group_sizes = vec![3];
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
         let r = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv);

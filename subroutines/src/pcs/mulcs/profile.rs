@@ -25,14 +25,20 @@ pub(crate) fn profiling_enabled() -> bool {
     }
 }
 
-static HEADER_EMITTED: AtomicBool = AtomicBool::new(false);
-
 /// Emit a profiling CSV row to stdout (unified 9-column schema).
 fn emit_csv(backend: &str, nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
-    if !HEADER_EMITTED.swap(true, Ordering::Relaxed) {
+    println!("mulcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
+}
+
+/// Emit the unified 9-column CSV header once. Call at profile startup
+/// if no top-level runner provides it. (Currently the mulcs_profile runner
+/// prints its own header, so this is retained for standalone use.)
+#[allow(dead_code)]
+pub(crate) fn emit_header_once() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if !DONE.swap(true, Ordering::Relaxed) {
         println!("source,backend,nv,N,repeat,phase,elapsed_ms,count,notes");
     }
-    println!("mulcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
 }
 
 /// A scoped timer. When profiling is disabled, does nothing (no Instant).

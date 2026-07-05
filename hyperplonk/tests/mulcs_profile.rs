@@ -201,7 +201,7 @@ mod tests {
         );
         println!("# NV_RANGE={:?} BACKEND={} REPEAT={}", nvs, backend, repeat);
 
-        // CSV header
+        // Unified CSV header — printed once
         println!("source,backend,nv,N,repeat,phase,elapsed_ms,count,notes");
 
         for &nv in &nvs {
