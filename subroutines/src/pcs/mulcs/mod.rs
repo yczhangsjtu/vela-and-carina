@@ -418,21 +418,19 @@ pub(crate) fn multi_open_internal<E: Pairing>(
     let mut f_vs = Vec::with_capacity(num_groups);
     let mut h_bars = Vec::with_capacity(num_groups);
 
-    let mut t_combine_ns = 0u128;
-    let mut t_h_ns = 0u128;
-    let mut t_hbar_ns = 0u128;
-    let mut t_commit_ns = 0u128;
+    let mut t_combine = profile::MaybeTimer::new();
+    let mut t_h = profile::MaybeTimer::new();
+    let mut t_hbar = profile::MaybeTimer::new();
+    let mut t_commit = profile::MaybeTimer::new();
 
     for group in &groups {
         let _group_size = group.len();
         let point = &group[0].1;
 
-        // Get alpha challenge for this group
         let alpha_buf = transcript.get_and_append_challenge_vectors(b"group_alpha", 1)?;
         let alpha_base = alpha_buf[0];
 
-        // Combine polynomials and evals: F = sum alpha_base^j * f_j
-        let t0 = std::time::Instant::now();
+        let tick = t_combine.start();
         let mut combined_coeffs = vec![E::ScalarField::zero(); n];
         let mut combined_eval = E::ScalarField::zero();
         let mut alpha_pow = E::ScalarField::one();
@@ -444,21 +442,21 @@ pub(crate) fn multi_open_internal<E: Pairing>(
             combined_eval += alpha_pow * evals[idx];
             alpha_pow *= alpha_base;
         }
-        t_combine_ns += t0.elapsed().as_nanos();
+        t_combine.add(&tick);
 
         let f_v = UnivarPoly::new(combined_coeffs);
-        let t0 = std::time::Instant::now();
+        let tick = t_h.start();
         let h = UnivarPoly::compute_h(&f_v.coeffs, mu, point, combined_eval);
-        t_h_ns += t0.elapsed().as_nanos();
+        t_h.add(&tick);
 
         let delta = E::ScalarField::one();
-        let t0 = std::time::Instant::now();
+        let tick = t_hbar.start();
         let h_bar = UnivarPoly::compute_h_bar(&h, gamma, n, delta);
-        t_hbar_ns += t0.elapsed().as_nanos();
+        t_hbar.add(&tick);
 
-        let t0 = std::time::Instant::now();
+        let tick = t_commit.start();
         let cm_hbar = pp.commit(&h_bar.coeffs);
-        t_commit_ns += t0.elapsed().as_nanos();
+        t_commit.add(&tick);
 
         transcript.append_serializable_element(b"h", &cm_hbar)?;
         f_vs.push(f_v);
@@ -466,40 +464,38 @@ pub(crate) fn multi_open_internal<E: Pairing>(
         cm_hbars.push(cm_hbar);
     }
     // Emit fine-grained per-group sub-phase timers
-    if profile::profiling_enabled() {
-        profile::emit_manual(
-            nv,
-            n,
-            "multi_open_combine_polys",
-            t_combine_ns as f64 / 1_000_000.0,
-            num_openings,
-            "random-combination",
-        );
-        profile::emit_manual(
-            nv,
-            n,
-            "multi_open_compute_h",
-            t_h_ns as f64 / 1_000_000.0,
-            num_groups,
-            "compute-h",
-        );
-        profile::emit_manual(
-            nv,
-            n,
-            "multi_open_compute_h_bar",
-            t_hbar_ns as f64 / 1_000_000.0,
-            num_groups,
-            "compute-hbar",
-        );
-        profile::emit_manual(
-            nv,
-            n,
-            "multi_open_commit_hbar",
-            t_commit_ns as f64 / 1_000_000.0,
-            num_groups,
-            "commit-hbar",
-        );
-    }
+    profile::emit_manual(
+        nv,
+        n,
+        "multi_open_combine_polys",
+        t_combine.ns() as f64 / 1_000_000.0,
+        num_openings,
+        "random-combination",
+    );
+    profile::emit_manual(
+        nv,
+        n,
+        "multi_open_compute_h",
+        t_h.ns() as f64 / 1_000_000.0,
+        num_groups,
+        "compute-h",
+    );
+    profile::emit_manual(
+        nv,
+        n,
+        "multi_open_compute_h_bar",
+        t_hbar.ns() as f64 / 1_000_000.0,
+        num_groups,
+        "compute-hbar",
+    );
+    profile::emit_manual(
+        nv,
+        n,
+        "multi_open_commit_hbar",
+        t_commit.ns() as f64 / 1_000_000.0,
+        num_groups,
+        "commit-hbar",
+    );
     drop(_t_pergroup);
 
     // Phase 3: Fiat-Shamir z
@@ -1412,5 +1408,98 @@ mod tests {
             &mut tp,
         );
         assert!(r.is_err(), "should reject mismatched evals vs polys");
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_inconsistent_num_vars() {
+        let (ck, _vk) = setup(4);
+        let mut rng = test_rng();
+        let poly4 = random_poly(4, &mut rng);
+        let poly3 = random_poly(3, &mut rng);
+        let point = random_point(4, &mut rng);
+        let mut tp = IOPTranscript::new(b"test");
+        let r = MulcsPCS::<E>::multi_open(
+            &ck,
+            &[poly4, poly3],
+            &[point.clone(), point.clone()],
+            &[Fr::one(), Fr::one()],
+            &mut tp,
+        );
+        assert!(r.is_err(), "should reject inconsistent num_vars");
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_wrong_point_len() {
+        let (ck, _vk) = setup(4);
+        let mut rng = test_rng();
+        let poly = random_poly(4, &mut rng);
+        let short_point = random_point(3, &mut rng);
+        let mut tp = IOPTranscript::new(b"test");
+        let r = MulcsPCS::<E>::multi_open(&ck, &[poly], &[short_point], &[Fr::one()], &mut tp);
+        assert!(r.is_err(), "should reject point.len() != nv");
+    }
+
+    fn assert_rejects(backend: &str, result: Result<bool, PCSError>) {
+        match result {
+            Ok(true) => panic!("{backend}: expected reject but got true"),
+            Ok(false) => {}, // ok
+            Err(e) => eprintln!("# {backend} reject with error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_mulcs_batch_verify_rejects_group_sizes_too_long() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"test");
+        let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+        // group_sizes.len() > num_groups
+        proof.group_sizes.push(1);
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        let r = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv);
+        assert_rejects("group_sizes_too_long", r);
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_batch_verify_rejects_group_sizes_sum_mismatch() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"test");
+        let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+        // group_sizes sum == num_openings but len != num_groups: add extra entry
+        proof.group_sizes = vec![2, 1]; // correct lengths, same num_groups → should pass
+        proof.group_sizes = vec![2]; // wrong: len=1 != num_groups=3 (but sum=2 != num_openings=3)
+        proof.group_sizes = vec![3]; // len=1 != num_groups=3, sum=3 == num_openings=3
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        let r = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv);
+        assert_rejects("group_sizes_sum_ok_len_mismatch", r);
+        Ok(())
     }
 }

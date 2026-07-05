@@ -2,8 +2,8 @@
 //!
 //! Controlled by env var `MULCS_PROFILE=1`. When disabled, all operations are
 //! near-zero-cost (no Instant::now(), no env reads after first check).
-//! Outputs CSV lines to stdout (same as top-level profiling):
-//! `mulcs_internal,<nv>,<N>,<phase>,<elapsed_ms>,<count>,<notes>`
+//! Outputs CSV lines to stdout, unified 9-column schema:
+//! `source,backend,nv,N,repeat,phase,elapsed_ms,count,notes`
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -27,16 +27,17 @@ pub(crate) fn profiling_enabled() -> bool {
 
 static HEADER_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Emit a profiling CSV row to stdout.
-fn emit_csv(nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
+/// Emit a profiling CSV row to stdout (unified 9-column schema).
+fn emit_csv(backend: &str, nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
     if !HEADER_EMITTED.swap(true, Ordering::Relaxed) {
-        println!("# source,nv,N,phase,elapsed_ms,count,notes");
+        println!("source,backend,nv,N,repeat,phase,elapsed_ms,count,notes");
     }
-    println!("mulcs_internal,{nv},{n},{phase},{ms:.6},{count},{notes}");
+    println!("mulcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
 }
 
 /// A scoped timer. When profiling is disabled, does nothing (no Instant).
 pub(crate) struct ScopedTimer {
+    backend: &'static str,
     nv: usize,
     n: usize,
     phase: &'static str,
@@ -59,6 +60,7 @@ impl ScopedTimer {
             None
         };
         ScopedTimer {
+            backend: "Mulcs",
             nv,
             n,
             phase,
@@ -73,6 +75,7 @@ impl Drop for ScopedTimer {
     fn drop(&mut self) {
         if let Some(start) = self.start {
             emit_csv(
+                self.backend,
                 self.nv,
                 self.n,
                 self.phase,
@@ -88,6 +91,52 @@ impl Drop for ScopedTimer {
 #[allow(dead_code)]
 pub(crate) fn emit_manual(nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
     if profiling_enabled() {
-        emit_csv(nv, n, phase, ms, count, notes);
+        emit_csv("Mulcs", nv, n, phase, ms, count, notes);
     }
+}
+
+/// A manual timer that only accumulates when profiling is enabled.
+/// Used for fine-grained sub-phase timing inside loops without overhead when
+/// disabled.
+pub(crate) struct MaybeTimer {
+    active: bool,
+    acc_ns: u128,
+}
+
+impl MaybeTimer {
+    pub(crate) fn new() -> Self {
+        MaybeTimer {
+            active: profiling_enabled(),
+            acc_ns: 0,
+        }
+    }
+
+    /// Start timing. Returns a sentinel; call .stop() on it.
+    pub(crate) fn start(&self) -> MaybeTick {
+        MaybeTick {
+            t0: if self.active {
+                Some(Instant::now())
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Add elapsed ns from a completed tick.
+    pub(crate) fn add(&mut self, tick: &MaybeTick) {
+        if self.active {
+            if let Some(t0) = tick.t0 {
+                self.acc_ns += t0.elapsed().as_nanos();
+            }
+        }
+    }
+
+    /// Get accumulated nanoseconds. Only meaningful when profiling is enabled.
+    pub(crate) fn ns(&self) -> u128 {
+        self.acc_ns
+    }
+}
+
+pub(crate) struct MaybeTick {
+    t0: Option<Instant>,
 }
