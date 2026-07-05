@@ -21,9 +21,9 @@ use subroutines::{
     poly_iop::PolyIOP,
 };
 
-const SUPPORTED_SIZE: usize = 20;
+const SUPPORTED_SIZE: usize = 16;
 const MIN_NUM_VARS: usize = 8;
-const MAX_NUM_VARS: usize = 20;
+const MAX_NUM_VARS: usize = 14;
 const MIN_CUSTOM_DEGREE: usize = 1;
 const MAX_CUSTOM_DEGREE: usize = 32;
 const HIGH_DEGREE_TEST_NV: usize = 15;
@@ -33,15 +33,8 @@ fn main() -> Result<(), HyperPlonkErrors> {
     println!("start benchmark with #{} threads", thread);
     let mut rng = test_rng();
     let pcs_srs = {
-        match read_srs() {
-            Ok(p) => p,
-            Err(_e) => {
-                let srs =
-                    MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
-                write_srs(&srs);
-                srs
-            },
-        }
+        let srs = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
+        srs
     };
     bench_jellyfish_plonk(&pcs_srs, thread)?;
     println!();

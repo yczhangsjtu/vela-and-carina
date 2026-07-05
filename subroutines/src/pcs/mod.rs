@@ -5,6 +5,7 @@
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
 mod errors;
+mod mulcs;
 mod multilinear_kzg;
 mod structs;
 mod univariate_kzg;
@@ -129,6 +130,11 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         // trait without always implementing the batching APIs.
         unimplemented!()
     }
+}
+
+/// Convenience trait for batch proofs that carry per-opening evaluations.
+pub trait HasEvals<F> {
+    fn evals(&self) -> &[F];
 }
 
 /// API definitions for structured reference string

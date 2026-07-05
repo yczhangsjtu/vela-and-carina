@@ -20,12 +20,11 @@ use rayon::iter::IntoParallelRefIterator;
 use rayon::iter::ParallelIterator;
 use std::{marker::PhantomData, sync::Arc};
 use subroutines::{
-    pcs::prelude::{Commitment, PolynomialCommitmentScheme},
+    pcs::prelude::{Commitment, HasEvals, PolynomialCommitmentScheme},
     poly_iop::{
         prelude::{PermutationCheck, ZeroCheck},
         PolyIOP,
     },
-    BatchProof,
 };
 use transcript::IOPTranscript;
 
@@ -41,8 +40,8 @@ where
         Point = Vec<E::ScalarField>,
         Evaluation = E::ScalarField,
         Commitment = Commitment<E>,
-        BatchProof = BatchProof<E, PCS>,
     >,
+    PCS::BatchProof: HasEvals<E::ScalarField>,
 {
     type Index = HyperPlonkIndex<E::ScalarField>;
     type ProvingKey = HyperPlonkProvingKey<E, PCS>;
@@ -416,16 +415,16 @@ where
         }
 
         // Extract evaluations from openings
-        let prod_evals = &proof.batch_openings.f_i_eval_at_point_i[0..4];
-        let frac_evals = &proof.batch_openings.f_i_eval_at_point_i[4..7];
-        let perm_evals = &proof.batch_openings.f_i_eval_at_point_i[7..7 + num_witnesses];
+        let prod_evals = &proof.batch_openings.evals()[0..4];
+        let frac_evals = &proof.batch_openings.evals()[4..7];
+        let perm_evals = &proof.batch_openings.evals()[7..7 + num_witnesses];
         let witness_perm_evals =
-            &proof.batch_openings.f_i_eval_at_point_i[7 + num_witnesses..7 + 2 * num_witnesses];
+            &proof.batch_openings.evals()[7 + num_witnesses..7 + 2 * num_witnesses];
         let witness_gate_evals =
-            &proof.batch_openings.f_i_eval_at_point_i[7 + 2 * num_witnesses..7 + 3 * num_witnesses];
-        let selector_evals = &proof.batch_openings.f_i_eval_at_point_i
+            &proof.batch_openings.evals()[7 + 2 * num_witnesses..7 + 3 * num_witnesses];
+        let selector_evals = &proof.batch_openings.evals()
             [7 + 3 * num_witnesses..7 + 3 * num_witnesses + num_selectors];
-        let pi_eval = proof.batch_openings.f_i_eval_at_point_i.last().unwrap();
+        let pi_eval = proof.batch_openings.evals().last().unwrap();
 
         // =======================================================================
         // 1. Verify zero_check_proof on `f(q_0(x),...q_l(x), w_0(x),...w_d(x))`
@@ -601,7 +600,7 @@ where
 
         comms.push(proof.witness_commits[0]);
         points.push(r_pi_padded);
-        assert_eq!(comms.len(), proof.batch_openings.f_i_eval_at_point_i.len());
+        assert_eq!(comms.len(), proof.batch_openings.evals().len());
         end_timer!(pi_step);
         end_timer!(step);
 

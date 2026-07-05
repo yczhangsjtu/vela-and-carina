@@ -14,7 +14,7 @@ use crate::{
     pcs::{
         multilinear_kzg::util::eq_eval,
         prelude::{Commitment, PCSError},
-        PolynomialCommitmentScheme,
+        HasEvals, PolynomialCommitmentScheme,
     },
     poly_iop::{prelude::SumCheck, PolyIOP},
     IOPProof,
@@ -275,6 +275,16 @@ where
 
     end_timer!(open_timer);
     Ok(res)
+}
+
+impl<E, PCS> HasEvals<E::ScalarField> for BatchProof<E, PCS>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<E>,
+{
+    fn evals(&self) -> &[E::ScalarField] {
+        &self.f_i_eval_at_point_i
+    }
 }
 
 #[cfg(test)]

@@ -214,6 +214,51 @@ mod test {
     }
 
     #[test]
+    fn bench_hyperplonk_timed() -> Result<(), HyperPlonkErrors> {
+        use std::time::Instant;
+        let mut rng = test_rng();
+
+        for nv in [6usize, 8, 10] {
+            let size = 1 << nv;
+            println!("\n=== HyperPlonk  μ={nv}  N={size} ===");
+
+            let t0 = Instant::now();
+            let pcs_srs = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
+            println!("  SRS gen:     {:>10.2?}", t0.elapsed());
+
+            let gate = CustomizedGates::vanilla_plonk_gate();
+            let circuit = MockCircuit::<Fr>::new(size, &gate);
+            assert!(circuit.is_satisfied());
+            let index = circuit.index;
+
+            let t0 = Instant::now();
+            let (pk, vk) = <PolyIOP<Fr> as HyperPlonkSNARK<
+                Bls12_381,
+                MultilinearKzgPCS<Bls12_381>,
+            >>::preprocess(&index, &pcs_srs)?;
+            println!("  Setup:       {:>10.2?}", t0.elapsed());
+
+            let t0 = Instant::now();
+            let proof = <PolyIOP<Fr> as HyperPlonkSNARK<
+                Bls12_381,
+                MultilinearKzgPCS<Bls12_381>,
+            >>::prove(&pk, &circuit.public_inputs, &circuit.witnesses)?;
+            println!("  Prover:      {:>10.2?}", t0.elapsed());
+
+            let t0 = Instant::now();
+            let ok =
+                <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+            println!("  Verifier:    {:>10.2?}", t0.elapsed());
+            assert!(ok);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_mock_circuit_zkp() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let pcs_srs =

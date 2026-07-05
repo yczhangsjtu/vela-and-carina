@@ -7,6 +7,10 @@
 //! Prelude
 pub use crate::pcs::{
     errors::PCSError,
+    mulcs::{
+        srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
+        MulcsBatchProof, MulcsPCS, MulcsProof,
+    },
     multilinear_kzg::{
         batching::BatchProof,
         srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam},
@@ -17,5 +21,5 @@ pub use crate::pcs::{
         srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam},
         UnivariateKzgBatchProof, UnivariateKzgPCS, UnivariateKzgProof,
     },
-    PolynomialCommitmentScheme, StructuredReferenceString,
+    HasEvals, PolynomialCommitmentScheme, StructuredReferenceString,
 };
