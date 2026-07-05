@@ -2,7 +2,7 @@
 //!
 //! Controlled by env var `MULCS_PROFILE=1`. When disabled, all operations are
 //! near-zero-cost (no Instant::now(), no env reads after first check).
-//! Outputs CSV lines to stderr:
+//! Outputs CSV lines to stdout (same as top-level profiling):
 //! `mulcs_internal,<nv>,<N>,<phase>,<elapsed_ms>,<count>,<notes>`
 
 use std::{
@@ -27,12 +27,12 @@ pub(crate) fn profiling_enabled() -> bool {
 
 static HEADER_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Emit a profiling CSV row to stderr.
+/// Emit a profiling CSV row to stdout.
 fn emit_csv(nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
     if !HEADER_EMITTED.swap(true, Ordering::Relaxed) {
-        eprintln!("# source,nv,N,phase,elapsed_ms,count,notes");
+        println!("# source,nv,N,phase,elapsed_ms,count,notes");
     }
-    eprintln!("mulcs_internal,{nv},{n},{phase},{ms:.6},{count},{notes}");
+    println!("mulcs_internal,{nv},{n},{phase},{ms:.6},{count},{notes}");
 }
 
 /// A scoped timer. When profiling is disabled, does nothing (no Instant).

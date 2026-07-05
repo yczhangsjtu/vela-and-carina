@@ -310,7 +310,43 @@ pub(crate) fn multi_open_internal<E: Pairing>(
     evals: &[E::ScalarField],
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<MulcsBatchProof<E>, PCSError> {
+    // ── Input validation ──
+    if polynomials.is_empty() {
+        return Err(PCSError::InvalidParameters(
+            "empty polynomial list".to_string(),
+        ));
+    }
+    if polynomials.len() != points.len() {
+        return Err(PCSError::InvalidParameters(format!(
+            "polynomials.len {} != points.len {}",
+            polynomials.len(),
+            points.len()
+        )));
+    }
+    if polynomials.len() != evals.len() {
+        return Err(PCSError::InvalidParameters(format!(
+            "polynomials.len {} != evals.len {}",
+            polynomials.len(),
+            evals.len()
+        )));
+    }
     let nv = polynomials[0].num_vars;
+    for poly in polynomials.iter() {
+        if poly.num_vars != nv {
+            return Err(PCSError::InvalidParameters(format!(
+                "inconsistent num_vars: {} vs {}",
+                poly.num_vars, nv
+            )));
+        }
+    }
+    for pt in points.iter() {
+        if pt.len() != nv {
+            return Err(PCSError::InvalidParameters(format!(
+                "point len {} != nv {nv}",
+                pt.len()
+            )));
+        }
+    }
     let n = 1 << nv;
     let mu = nv;
     let gamma = pp.gamma;
@@ -347,7 +383,7 @@ pub(crate) fn multi_open_internal<E: Pairing>(
     drop(_t_group);
 
     if profile::profiling_enabled() {
-        eprintln!(
+        println!(
             "# point groups: num_openings={num_openings} num_groups={num_groups} sizes={:?}",
             group_sizes
         );
@@ -382,8 +418,13 @@ pub(crate) fn multi_open_internal<E: Pairing>(
     let mut f_vs = Vec::with_capacity(num_groups);
     let mut h_bars = Vec::with_capacity(num_groups);
 
+    let mut t_combine_ns = 0u128;
+    let mut t_h_ns = 0u128;
+    let mut t_hbar_ns = 0u128;
+    let mut t_commit_ns = 0u128;
+
     for group in &groups {
-        let group_size = group.len();
+        let _group_size = group.len();
         let point = &group[0].1;
 
         // Get alpha challenge for this group
@@ -391,6 +432,7 @@ pub(crate) fn multi_open_internal<E: Pairing>(
         let alpha_base = alpha_buf[0];
 
         // Combine polynomials and evals: F = sum alpha_base^j * f_j
+        let t0 = std::time::Instant::now();
         let mut combined_coeffs = vec![E::ScalarField::zero(); n];
         let mut combined_eval = E::ScalarField::zero();
         let mut alpha_pow = E::ScalarField::one();
@@ -402,16 +444,61 @@ pub(crate) fn multi_open_internal<E: Pairing>(
             combined_eval += alpha_pow * evals[idx];
             alpha_pow *= alpha_base;
         }
+        t_combine_ns += t0.elapsed().as_nanos();
 
         let f_v = UnivarPoly::new(combined_coeffs);
+        let t0 = std::time::Instant::now();
         let h = UnivarPoly::compute_h(&f_v.coeffs, mu, point, combined_eval);
+        t_h_ns += t0.elapsed().as_nanos();
+
         let delta = E::ScalarField::one();
+        let t0 = std::time::Instant::now();
         let h_bar = UnivarPoly::compute_h_bar(&h, gamma, n, delta);
+        t_hbar_ns += t0.elapsed().as_nanos();
+
+        let t0 = std::time::Instant::now();
         let cm_hbar = pp.commit(&h_bar.coeffs);
+        t_commit_ns += t0.elapsed().as_nanos();
+
         transcript.append_serializable_element(b"h", &cm_hbar)?;
         f_vs.push(f_v);
         h_bars.push(h_bar);
         cm_hbars.push(cm_hbar);
+    }
+    // Emit fine-grained per-group sub-phase timers
+    if profile::profiling_enabled() {
+        profile::emit_manual(
+            nv,
+            n,
+            "multi_open_combine_polys",
+            t_combine_ns as f64 / 1_000_000.0,
+            num_openings,
+            "random-combination",
+        );
+        profile::emit_manual(
+            nv,
+            n,
+            "multi_open_compute_h",
+            t_h_ns as f64 / 1_000_000.0,
+            num_groups,
+            "compute-h",
+        );
+        profile::emit_manual(
+            nv,
+            n,
+            "multi_open_compute_h_bar",
+            t_hbar_ns as f64 / 1_000_000.0,
+            num_groups,
+            "compute-hbar",
+        );
+        profile::emit_manual(
+            nv,
+            n,
+            "multi_open_commit_hbar",
+            t_commit_ns as f64 / 1_000_000.0,
+            num_groups,
+            "commit-hbar",
+        );
     }
     drop(_t_pergroup);
 
@@ -545,11 +632,15 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     let open_timer = start_timer!(|| "mulcs batch verify");
 
     // ── Length sanity checks ──
+    if num_openings == 0 {
+        return Err(PCSError::InvalidProof("empty batch proof".to_string()));
+    }
     if commitments.len() != num_openings
         || points.len() != num_openings
         || proof.f_i_eval_at_point_i.len() != num_openings
         || proof.cm_hbars.len() != num_groups
         || proof.mulcs_evals.len() != num_groups
+        || proof.group_sizes.len() != num_groups
         || proof.group_sizes.iter().sum::<usize>() != num_openings
     {
         return Err(PCSError::InvalidProof(
@@ -581,13 +672,13 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         }
     }
 
-    // ── Transcript replay ──
+    // ── Transcript replay: absorb points + evals + group metadata ──
     let _t_ts = profile::ScopedTimer::new(
         mu,
         n,
         "batch_verify_transcript",
         num_openings,
-        "absorb-pts-evals-hbars",
+        "absorb-pts-evals-meta",
     );
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
@@ -595,9 +686,6 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     for eval in proof.f_i_eval_at_point_i.iter() {
         transcript.append_field_element(b"eval", eval)?;
     }
-    let gamma = vp.gamma;
-
-    // Replay group metadata absorption
     transcript.append_field_element(b"num_groups", &E::ScalarField::from(num_groups as u64))?;
     for (g, group) in groups.iter().enumerate() {
         for &(idx, _) in group.iter() {
@@ -605,9 +693,12 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         }
         transcript.append_field_element(b"group_end", &E::ScalarField::from(g as u64))?;
     }
+    drop(_t_ts);
 
-    // Derive alpha challenges for each group AND absorb cm_hbars (interleaved,
-    // matching prover)
+    let gamma = vp.gamma;
+
+    // Derive alpha challenges for each group AND absorb cm_hbars (interleaved with
+    // prover)
     let _t_fs =
         profile::ScopedTimer::new(mu, n, "batch_verify_fs_alpha", num_groups, "group-alphas");
     let mut group_alphas: Vec<(E::ScalarField, Vec<E::ScalarField>)> =
@@ -1248,6 +1339,78 @@ mod tests {
         tv2.append_field_element(b"init", &Fr::ZERO)?;
         let r2 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv2);
         assert!(r2.is_err() || !r2.unwrap());
+
+        // Tamper: group_sizes.len() != num_groups
+        let mut proof2 = MulcsPCS::<E>::multi_open(
+            &ck,
+            &polys,
+            &points,
+            &evals,
+            &mut IOPTranscript::new(b"t2"),
+        )?;
+        proof2.group_sizes.pop(); // too few
+        let mut tv3 = IOPTranscript::new(b"test");
+        tv3.append_field_element(b"init", &Fr::ZERO)?;
+        let r3 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof2, &mut tv3);
+        assert!(
+            r3.is_err() || !r3.unwrap(),
+            "should reject group_sizes too short"
+        );
+
+        // Tamper: num_groups changed
+        let mut proof3 = MulcsPCS::<E>::multi_open(
+            &ck,
+            &polys,
+            &points,
+            &evals,
+            &mut IOPTranscript::new(b"t3"),
+        )?;
+        proof3.num_groups = 99;
+        let mut tv4 = IOPTranscript::new(b"test");
+        tv4.append_field_element(b"init", &Fr::ZERO)?;
+        let r4 = MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof3, &mut tv4);
+        assert!(
+            r4.is_err() || !r4.unwrap(),
+            "should reject wrong num_groups"
+        );
+
         Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_empty_input() {
+        let (ck, _vk) = setup(4);
+        let empty: &[Arc<DenseMultilinearExtension<Fr>>] = &[];
+        let points: &[Vec<Fr>] = &[];
+        let evals: &[Fr] = &[];
+        let mut tp = IOPTranscript::new(b"test");
+        let r = MulcsPCS::<E>::multi_open(&ck, empty, points, evals, &mut tp);
+        assert!(r.is_err(), "should reject empty polynomial list");
+    }
+
+    #[test]
+    fn test_mulcs_multi_open_rejects_mismatched_lengths() {
+        let (ck, _vk) = setup(4);
+        let mut rng = test_rng();
+        let poly = random_poly(4, &mut rng);
+        let point = random_point(4, &mut rng);
+        let mut tp = IOPTranscript::new(b"test");
+        let r = MulcsPCS::<E>::multi_open(
+            &ck,
+            &[poly.clone()],
+            &[point.clone(), point.clone()],
+            &[Fr::one()],
+            &mut tp,
+        );
+        assert!(r.is_err(), "should reject mismatched points vs polys");
+        let mut tp = IOPTranscript::new(b"test");
+        let r = MulcsPCS::<E>::multi_open(
+            &ck,
+            &[poly.clone()],
+            &[point.clone()],
+            &[Fr::one(), Fr::one()],
+            &mut tp,
+        );
+        assert!(r.is_err(), "should reject mismatched evals vs polys");
     }
 }
