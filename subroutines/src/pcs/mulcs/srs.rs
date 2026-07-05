@@ -4,14 +4,11 @@
 //! Uses a random field element as the structured randomness γ for
 //! the Claymore identity.
 
-use crate::pcs::{
-    mulcs::profile::{emit_header, emit_manual, ScopedTimer},
-    prelude::PCSError,
-    StructuredReferenceString,
-};
+use crate::pcs::{mulcs::profile::ScopedTimer, prelude::PCSError, StructuredReferenceString};
 use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
+use rayon::prelude::*;
 
 /// Universal parameters for Mulcs PCS. Contains prover G1 powers
 /// up to `max_degree` and verifier G2 elements.
@@ -120,7 +117,14 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         let max_degree = 2 * (1 << supported_num_vars); // 2N
         let n = 1 << supported_num_vars;
 
-        emit_header();
+        // Total timer — covers everything including pp/vp construction
+        let _t_total = ScopedTimer::new(
+            supported_num_vars,
+            n,
+            "srs_gen_total",
+            max_degree + 1,
+            "total",
+        );
 
         // Phase: sample random x, g1, g2
         let _t0 = ScopedTimer::new(supported_num_vars, n, "srs_gen_sample", 1, "random-x-g1-g2");
@@ -145,16 +149,18 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         }
         drop(_t1);
 
-        // Phase: compute G1 powers (MSM)
+        // Phase: compute G1 powers (parallel scalar multiplication)
         let _t2 = ScopedTimer::new(
             supported_num_vars,
             n,
             "srs_gen_g1_powers",
             max_degree + 1,
-            "G1-scalar-mult",
+            "G1-scalar-mult-par",
         );
-        let g1_powers: Vec<E::G1Affine> =
-            x_pows.iter().map(|&xi| (g1 * xi).into_affine()).collect();
+        let g1_powers: Vec<E::G1Affine> = x_pows
+            .par_iter()
+            .map(|&xi| (g1 * xi).into_affine())
+            .collect();
         drop(_t2);
 
         // Phase: compute G2 elements
@@ -169,8 +175,6 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         let gamma = E::ScalarField::rand(rng);
         drop(_t4);
 
-        // Total
-        let t_total = std::time::Instant::now();
         let pp = MulcsProverParam {
             g1_powers,
             g2_one,
@@ -189,14 +193,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
             max_degree,
         };
 
-        emit_manual(
-            supported_num_vars,
-            n,
-            "srs_gen_total",
-            t_total.elapsed().as_secs_f64() * 1000.0,
-            max_degree + 1,
-            "g1_powers.len",
-        );
+        drop(_t_total);
 
         Ok(MulcsUniversalParams {
             prover_param: pp,

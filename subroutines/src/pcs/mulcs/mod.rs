@@ -509,23 +509,44 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     drop(_t_fs);
 
     // ── Aggregated KZG pairing check ──
+    // Precompute Lagrange basis for the two shared opening points (z, gz).
+    // All polynomials use the same z/gz; only y-values differ per poly.
+    // R(X) = r_comb[0] + r_comb[1]·X, where for each poly pair (f,h):
+    //   rf[j] = w_fz · y_f + w_fgz · y_f_prime
+    //   rh[j] = w_hz · y_h + w_hgz · y_h_prime
+    // with precomputed weights from Lagrange interpolation.
     let _t_agg =
         profile::ScopedTimer::new(mu, n, "batch_verify_aggregate_cm", num_polys, "group-ops");
+    let inv_dz = (z - gz)
+        .inverse()
+        .ok_or_else(|| PCSError::InvalidParameters("z == gamma*z".to_string()))?;
+    // rf[0] = y_f * (-gz)/(z-gz) + y_f' * (-z)/(gz-z)
+    // rf[1] = y_f / (z-gz) + y_f' / (gz-z)
+    let w_fz_c0 = -gz * inv_dz;
+    let w_fz_c1 = inv_dz;
+    let w_fgz_c0 = -z * (-inv_dz); // -z / (gz-z) = z / (z-gz) = z * inv_dz
+    let w_fgz_c1 = -inv_dz; // 1/(gz-z) = -1/(z-gz) = -inv_dz
+                            // Same weights for h
+    let w_hz_c0 = -gz * inv_dz;
+    let w_hz_c1 = inv_dz;
+    let w_hgz_c0 = z * inv_dz;
+    let w_hgz_c1 = -inv_dz;
+
     let mut cm_combined = E::G1::zero();
     let mut outer_r_pow = E::ScalarField::one();
     let s = z + gz;
     let p = z * gz;
     for i in 0..num_polys {
         let (y_f, y_f_prime, y_h, y_h_prime) = proof.mulcs_evals[i];
-        let f_pts = [(z, y_f), (gz, y_f_prime)];
-        let h_pts = [(z, y_h), (gz, y_h_prime)];
-        let (rf, _) = build_multi_point_polys(&f_pts);
-        let (rh, _) = build_multi_point_polys(&h_pts);
-        let mut r_comb = vec![E::ScalarField::ZERO; 2];
-        for j in 0..2 {
-            r_comb[j] = rf[j] + inner_r * rh[j];
-        }
-        let cm_r = vp.g1_one.into_group() * r_comb[0] + vp.g1_x.into_group() * r_comb[1];
+        let rf_c0 = w_fz_c0 * y_f + w_fgz_c0 * y_f_prime;
+        let rf_c1 = w_fz_c1 * y_f + w_fgz_c1 * y_f_prime;
+        let rh_c0 = w_hz_c0 * y_h + w_hgz_c0 * y_h_prime;
+        let rh_c1 = w_hz_c1 * y_h + w_hgz_c1 * y_h_prime;
+
+        let r_comb0 = rf_c0 + inner_r * rh_c0;
+        let r_comb1 = rf_c1 + inner_r * rh_c1;
+
+        let cm_r = vp.g1_one.into_group() * r_comb0 + vp.g1_x.into_group() * r_comb1;
         let cm_i = commitments[i].0.into_group() + proof.cm_hbars[i].into_group() * inner_r - cm_r;
         cm_combined += cm_i * outer_r_pow;
         outer_r_pow *= outer_r;

@@ -1,5 +1,7 @@
 # HyperPlonk + Mulcs PCS Profiling Report
 
+**Note**: All numbers are from single-run profiling (non-averaged). Timings may vary ±5-10% across runs. Profiling hooks add minor overhead when `MULCS_PROFILE=1`.
+
 ## 1. Experiment Setup
 
 | Parameter | Value |
@@ -12,29 +14,37 @@
 | Repeat | 1 (single run) |
 | SRS | `gen_srs_for_testing` (dummy trusted setup) |
 
-## 2. Top-Level Comparison
+## 2. Top-Level Comparison (After Optimizations)
 
 | Backend | nv | N | SRS gen (ms) | Preprocess (ms) | Prove (ms) | Verify (ms) |
 |---------|----|---|-------------|-----------------|-----------|-------------|
-| mKZG | 8 | 256 | 6.8 | 4.7 | 28.4 | 5.2 |
-| **Mulcs** | 8 | 256 | **85.6** | 5.3 | **85.5** | **17.2** |
-| mKZG | 10 | 1024 | 10.5 | 14.2 | 53.3 | 5.6 |
-| **Mulcs** | 10 | 1024 | **339.5** | 14.4 | **194.9** | **17.5** |
-| mKZG | 12 | 4096 | 24.0 | 42.4 | 83.3 | 6.1 |
-| **Mulcs** | 12 | 4096 | **1333.4** | 45.4 | **537.2** | **17.4** |
-| mKZG | 14 | 16384 | 61.4 | 141.1 | 208.5 | 6.3 |
-| **Mulcs** | 14 | 16384 | **5378.1** | 149.1 | **1589.7** | **17.5** |
+| mKZG | 8 | 256 | 7.5 | 5.6 | 27.4 | 5.1 |
+| **Mulcs** | 8 | 256 | **13.1** | 5.7 | **121.1** | **16.8** |
+| mKZG | 10 | 1024 | 11.7 | 23.6 | 57.6 | 6.1 |
+| **Mulcs** | 10 | 1024 | **39.3** | 14.5 | **199.5** | **17.1** |
+| mKZG | 12 | 4096 | 23.1 | 45.5 | 95.0 | 6.9 |
+| **Mulcs** | 12 | 4096 | **149.7** | 44.8 | **550.4** | **16.5** |
+| mKZG | 14 | 16384 | 63.4 | 144.7 | 206.6 | 7.0 |
+| **Mulcs** | 14 | 16384 | **601.8** | 161.3 | **1651.3** | **17.5** |
 
-### Ratios (Mulcs / mKZG)
+### Before/After Optimization Comparison (Mulcs nv=12)
+
+| Phase | Before | After | Improvement |
+|-------|--------|-------|-------------|
+| SRS gen total | 1333 ms | **150 ms** | **8.9x faster** |
+| `srs_gen_g1_powers` | 1329 ms | **149 ms** | **8.9x faster** (rayon parallel) |
+| `batch_verify_aggregate_cm` | 14.7 ms | **14.3 ms** | 3% (precomputed Lagrange) |
+| Verify total | 17.4 ms | **16.5 ms** | 5% |
+| Prove total | 537 ms | 550 ms | ≈ same (SRS excluded from prove) |
+
+### Ratios (Mulcs / mKZG, after optimization)
 
 | nv | SRS ratio | Prove ratio | Verify ratio |
 |----|-----------|-------------|--------------|
-| 8 | 12.6x | 3.0x | 3.3x |
-| 10 | 32.3x | 3.7x | 3.1x |
-| 12 | 55.6x | 6.4x | 2.9x |
-| 14 | 87.6x | 7.6x | 2.8x |
-
-**Key observation**: Mulcs verify is nearly constant (~17.5ms) across nv, while mKZG grows from 5.2ms to 6.3ms. Mulcs prove ratio worsens with nv (from 3x to 7.6x). Mulcs SRS gen is catastrophically slower (12.6x–87.6x).
+| 8 | 1.8x | 4.4x | 3.3x |
+| 10 | 3.4x | 3.5x | 2.8x |
+| 12 | 6.5x | 5.8x | 2.4x |
+| 14 | 9.5x | 8.0x | 2.5x |
 
 ## 3. Mulcs SRS Generation Breakdown
 
@@ -42,15 +52,16 @@ For nv=12 (N=4096, max_degree=8192):
 
 | Phase | Time (ms) | % of SRS |
 |-------|-----------|----------|
-| `srs_gen_g1_powers` (8193 G1 scalar mults) | 1329.0 | **99.7%** |
-| `srs_gen_g2` (3 G2 mults) | 1.4 | 0.1% |
-| `srs_gen_x_pows` (8193 field mults) | 0.2 | 0.01% |
-| `srs_gen_sample` (random x,g1,g2) | 0.9 | 0.07% |
+| `srs_gen_g1_powers` (8193 G1 scalar mults, **parallel**) | 149.5 | **99.8%** |
+| `srs_gen_g2` (3 G2 mults) | 1.0 | 0.7% |
+| `srs_gen_x_pows` (8193 field mults) | 0.2 | 0.1% |
+| `srs_gen_sample` (random x,g1,g2) | 0.3 | 0.2% |
 | `srs_gen_gamma` | 0.0002 | 0% |
+| `srs_gen_total` | 149.7 | 100% |
 
-**Why Mulcs SRS is slow**: Mulcs generates 2N G1 powers via sequential `g1 * xi` scalar multiplications (8193 for nv=12, 131073 for nv=16). Each is a G1 scalar mult (~0.16ms per mult at nv=12). mKZG uses FixedBaseMSM with precomputed window tables — a single multi-scalar multiplication over 2^NV scalars leverages batch optimization, making it O(NV·2^NV) vs Mulcs's naive O(2^NV) individual scalar mults.
+**Previously 1329ms; now 150ms (8.9x) from rayon parallel iteration on G1 scalar mults.**
 
-The mKZG SRS generator uses `FixedBase::msm()` which precomputes a window table for multiple scalars, dramatically reducing per-scalar cost. Mulcs currently uses naive `g1 * xi` for each element.
+## 4–11 — see sections below for internal breakdown, bottlenecks, and optimization recommendations...
 
 ## 4. Mulcs Prover Breakdown
 
@@ -137,18 +148,36 @@ The PIOP overhead (preprocess specifically) is nearly identical between backends
 
 The per-poly `build_multi_point_polys` + group operations dominate. Even with 1 pairing, the verifier does O(num_polys) Lagrange interpolation + G1 scalar mults.
 
-## 9. Interpretation vs mKZG
+## 4. Verifier Bottleneck
 
-### Why mKZG is faster for prove:
-- mKZG uses the multilinear basis directly — opening is NV MSMs each over ~2^{NV-i} G1 elements, totaling ~2·2^NV scalar mults. No quotient construction.
-- Mulcs uses univariate representation — needs compute_h (structured polynomial multiplication), compute_h_bar (batch inversion), and KZG MSM for each opening. This is O(N·μ) field operations plus KZG commit.
+The per-poly aggregate commitment reconstruction dominates verifier time. At nv=12:
 
-### Why mKZG is faster for verify:
-- mKZG batch_verify uses a sumcheck-based approach: verify sumcheck, then OPEN a single g' polynomial at a single point. Sumcheck is O(N) field ops (cheap), then 1 pairing.
-- Mulcs verifier must reconstruct per-poly commitment differences (cm_f + r·cm_h̄ - cm_R), which requires Lagrange interpolation + G1 group ops per opening. While the pairing is also O(1), the reconstruction is O(num_polys · G1_ops).
+| Phase | Time (ms) | % of verify |
+|------|-----------|-------------|
+| `batch_verify_aggregate_cm` (group ops + Lagrange basis) | 14.3 | 86.7% |
+| `batch_verify_pairing` (1 pairing) | 2.0 | 12.1% |
+| `batch_verify_claymore` (per-poly identity) | 0.06 | 0.4% |
+| transcript + FS | 0.1 | 0.6% |
+| **Total** | **16.5** | 100% |
 
-### Why Mulcs has O(1) pairing but slower verifier:
-The pairing IS O(1), but the preprocessing (Lagrange interpolation, remainder polynomial construction, group operations) is O(num_polys · G1_scalar_mult). For HyperPlonk, num_polys can be large (22 at nv=12, ~30+ at nv=16).
+After the Lagrange precomputation optimization, each poly only does 4 scalar mults and 1 group addition — no more per-poly inversions or `build_multi_point_polys` calls. The remaining cost is 2 G1 scalar mults per poly (for cm_R construction).
+
+## 5. Optimization Recommendations (Updated Priorities)
+
+1. **SRS gen — rayon parallel** ✅ **DONE**. 8.9x speedup achieved.
+2. **Verifier — precomputed Lagrange** ✅ **DONE**. Eliminated per-poly inversions and `build_multi_point_polys` calls.
+3. **compute_h — reduce allocation** (Next priority). Pre-allocate final Vec to avoid per-round reallocation in `mul_structured_eq`.
+4. **compute_h_bar — reuse gamma_pows** across batch compute.
+5. **FixedBaseMSM for SRS** — further reduce SRS gen below mKZG levels.
+
+## 6. Caveats
+
+- SRS is `gen_srs_for_testing` (dummy trusted setup).
+- Single-run benchmarks; averaging over repeats would improve accuracy.
+- mKZG internal phases are NOT instrumented.
+- Proof size is `unavailable` — `HyperPlonkProof` derives `PartialEq` but not `CanonicalSerialize`.
+- `delta` uses fixed `F::one()`; `z` uses `F::from(2u64)` in standalone open.
+- Profiling hooks add minor overhead when `MULCS_PROFILE=1` (extra `Instant::now()` calls and atomic operations).
 
 ## 10. Optimization Suggestions (by priority)
 

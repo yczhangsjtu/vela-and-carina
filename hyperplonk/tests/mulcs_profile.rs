@@ -4,12 +4,12 @@
 //!
 //! Run with:
 //!   MULCS_PROFILE=1 NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk
-//! --release --test mulcs_profile -- --ignored --nocapture   NV_RANGE=8,10,12,
-//! 14,16 BACKEND=both cargo test -p hyperplonk --release --test mulcs_profile
-//! -- --ignored --nocapture
+//! --release --test mulcs_profile -- --ignored --nocapture   MULCS_PROFILE=1
+//! NV_RANGE=8,10,12,14 BACKEND=both cargo test -p hyperplonk --release --test
+//! mulcs_profile -- --ignored --nocapture
 //!
-//! Output: CSV lines to stderr (when MULCS_PROFILE=1), plus summary table to
-//! stdout.
+//! Output: CSV to stdout. Internal profiling lines go to stderr (when
+//! MULCS_PROFILE=1).
 
 #[cfg(test)]
 mod tests {
@@ -31,28 +31,44 @@ mod tests {
     type E = Bls12_381;
     type FrType = Fr;
 
+    const VALID_BACKENDS: &[&str] = &["mulcs", "mkzg", "both"];
+
     fn default_nv_range() -> Vec<usize> {
-        if let Ok(val) = env::var("NV_RANGE") {
-            val.split(',')
-                .filter_map(|s| s.trim().parse::<usize>().ok())
-                .collect()
-        } else {
-            vec![8, 10, 12]
+        let val = env::var("NV_RANGE").unwrap_or_else(|_| "8,10,12".to_string());
+        let nvs: Vec<usize> = val
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .collect();
+        if nvs.is_empty() {
+            panic!("NV_RANGE={val} parsed to empty list — provide comma-separated non-empty values like 8,10,12");
         }
+        nvs
     }
 
     fn default_backend() -> String {
-        env::var("BACKEND").unwrap_or_else(|_| "mulcs".to_string())
+        let val = env::var("BACKEND").unwrap_or_else(|_| "mulcs".to_string());
+        if !VALID_BACKENDS.contains(&val.as_str()) {
+            panic!(
+                "BACKEND={val} invalid — must be one of {:?}",
+                VALID_BACKENDS
+            );
+        }
+        val
     }
 
     fn default_repeat() -> usize {
-        env::var("REPEAT")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse()
-            .unwrap_or(1)
+        let val = env::var("REPEAT").unwrap_or_else(|_| "1".to_string());
+        let r: usize = val.parse().unwrap_or(1);
+        if r == 0 {
+            eprintln!("# WARNING: REPEAT=0, defaulting to 1");
+            1
+        } else {
+            r
+        }
     }
 
     fn print_csv_row(
+        source: &str,
         backend: &str,
         nv: usize,
         n: usize,
@@ -61,7 +77,7 @@ mod tests {
         ms: f64,
         notes: &str,
     ) {
-        println!("csv,{backend},{nv},{n},{repeat},{phase},{ms:.6},{notes}");
+        println!("{source},{backend},{nv},{n},{repeat},{phase},{ms:.6},{notes}");
     }
 
     fn bench_mulcs(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
@@ -72,22 +88,19 @@ mod tests {
         assert!(circuit.is_satisfied());
 
         for r in 0..repeat {
-            // SRS gen
             let t0 = Instant::now();
             let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
             let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("Mulcs", nv, n, r, "srs_gen", srs_ms, "");
+            print_csv_row("top_level", "Mulcs", nv, n, r, "srs_gen", srs_ms, "");
 
-            // Preprocess
             let t0 = Instant::now();
             let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::preprocess(
                 &circuit.index,
                 &srs,
             )?;
             let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("Mulcs", nv, n, r, "preprocess", prep_ms, "");
+            print_csv_row("top_level", "Mulcs", nv, n, r, "preprocess", prep_ms, "");
 
-            // Prove
             let t0 = Instant::now();
             let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::prove(
                 &pk,
@@ -95,9 +108,8 @@ mod tests {
                 &circuit.witnesses,
             )?;
             let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("Mulcs", nv, n, r, "prove", prove_ms, "");
+            print_csv_row("top_level", "Mulcs", nv, n, r, "prove", prove_ms, "");
 
-            // Verify
             let t0 = Instant::now();
             let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::verify(
                 &vk,
@@ -106,6 +118,7 @@ mod tests {
             )?;
             let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
             print_csv_row(
+                "top_level",
                 "Mulcs",
                 nv,
                 n,
@@ -130,7 +143,7 @@ mod tests {
             let t0 = Instant::now();
             let srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
             let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("mKZG", nv, n, r, "srs_gen", srs_ms, "");
+            print_csv_row("top_level", "mKZG", nv, n, r, "srs_gen", srs_ms, "");
 
             let t0 = Instant::now();
             let (pk, vk) =
@@ -139,7 +152,7 @@ mod tests {
                     &srs,
                 )?;
             let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("mKZG", nv, n, r, "preprocess", prep_ms, "");
+            print_csv_row("top_level", "mKZG", nv, n, r, "preprocess", prep_ms, "");
 
             let t0 = Instant::now();
             let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::prove(
@@ -148,7 +161,7 @@ mod tests {
                 &circuit.witnesses,
             )?;
             let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("mKZG", nv, n, r, "prove", prove_ms, "");
+            print_csv_row("top_level", "mKZG", nv, n, r, "prove", prove_ms, "");
 
             let t0 = Instant::now();
             let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::verify(
@@ -158,6 +171,7 @@ mod tests {
             )?;
             let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
             print_csv_row(
+                "top_level",
                 "mKZG",
                 nv,
                 n,
@@ -184,20 +198,18 @@ mod tests {
             threads
         );
         eprintln!("# NV_RANGE={:?} BACKEND={} REPEAT={}", nvs, backend, repeat);
-        println!(
-            "# HyperPlonk PCS Profile — threads={}, nvs={:?}",
-            threads, nvs
-        );
-        println!("backend,nv,N,repeat,phase,elapsed_ms,notes");
+
+        // CSV header
+        println!("source,backend,nv,N,repeat,phase,elapsed_ms,notes");
 
         for &nv in &nvs {
             let n = 1 << nv;
             if backend == "mulcs" || backend == "both" {
-                println!("# --- Mulcs nv={nv} N={n} ---");
+                eprintln!("# --- Mulcs nv={nv} N={n} ---");
                 bench_mulcs(nv, repeat)?;
             }
             if backend == "mkzg" || backend == "both" {
-                println!("# --- mKZG nv={nv} N={n} ---");
+                eprintln!("# --- mKZG nv={nv} N={n} ---");
                 bench_mkzg(nv, repeat)?;
             }
         }
