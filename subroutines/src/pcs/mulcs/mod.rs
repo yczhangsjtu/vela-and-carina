@@ -18,6 +18,7 @@ use transcript::IOPTranscript;
 
 use self::util::UnivarPoly;
 
+mod profile;
 pub(crate) mod srs;
 mod util;
 
@@ -121,8 +122,9 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
         poly: &Self::Polynomial,
     ) -> Result<Self::Commitment, PCSError> {
         let pp = prover_param.borrow();
+        let nv = poly.num_vars;
+        let n = 1 << nv;
         let commit_timer = start_timer!(|| "mulcs commit");
-        let n = 1 << poly.num_vars;
         if pp.max_degree < n - 1 {
             return Err(PCSError::InvalidParameters(format!(
                 "poly degree {} exceeds SRS max {}",
@@ -130,8 +132,13 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
                 pp.max_degree
             )));
         }
+        let _t_eval = profile::ScopedTimer::new(nv, n, "commit_to_evals", n, "to_evaluations");
         let scalars = poly.to_evaluations();
+        drop(_t_eval);
+
+        let _t_msm = profile::ScopedTimer::new(nv, n, "commit_msm", scalars.len(), "KZG-MSM");
         let cm = pp.commit(&scalars);
+        drop(_t_msm);
         end_timer!(commit_timer);
         Ok(Commitment(cm))
     }
@@ -277,30 +284,40 @@ pub(crate) fn multi_open_internal<E: Pairing>(
     evals: &[E::ScalarField],
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<MulcsBatchProof<E>, PCSError> {
+    let nv = polynomials[0].num_vars;
+    let n = 1 << nv;
+    let mu = nv;
+    let gamma = pp.gamma;
+    let num_polys = polynomials.len();
+    let _t_total = profile::ScopedTimer::new(nv, n, "multi_open_total", num_polys, "total");
     let open_timer = start_timer!(|| format!("mulcs multi open {} points", points.len()));
 
+    let _t_app = profile::ScopedTimer::new(
+        nv,
+        n,
+        "multi_open_append_pts_evals",
+        num_polys,
+        "transcript",
+    );
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
     for eval in evals.iter() {
         transcript.append_field_element(b"eval", eval)?;
     }
-
-    let nv = polynomials[0].num_vars;
-    let n = 1 << nv;
-    let mu = nv;
-    let gamma = pp.gamma;
-    let num_polys = polynomials.len();
+    drop(_t_app);
 
     let mut h_bars = Vec::with_capacity(num_polys);
     let mut cm_hbars = Vec::with_capacity(num_polys);
     let mut f_vs = Vec::with_capacity(num_polys);
 
+    let _t_perpoly =
+        profile::ScopedTimer::new(nv, n, "multi_open_per_poly", num_polys, "h-hbar-commit");
     for i in 0..num_polys {
         let coeffs = polynomials[i].to_evaluations();
         let f_v = UnivarPoly::new(coeffs.clone());
         let h = UnivarPoly::compute_h(&coeffs, mu, &points[i], evals[i]);
-        let delta = E::ScalarField::one(); // research: verifier does not need delta
+        let delta = E::ScalarField::one();
         let h_bar = UnivarPoly::compute_h_bar(&h, gamma, n, delta);
         let cm_hbar = pp.commit(&h_bar.coeffs);
         transcript.append_serializable_element(b"h", &cm_hbar)?;
@@ -308,11 +325,16 @@ pub(crate) fn multi_open_internal<E: Pairing>(
         h_bars.push(h_bar);
         cm_hbars.push(cm_hbar);
     }
+    drop(_t_perpoly);
 
+    let _t_fs = profile::ScopedTimer::new(nv, n, "multi_open_fs_z", 1, "transcript-challenge");
     let z_buf = transcript.get_and_append_challenge_vectors(b"z", 1)?;
     let z = z_buf[0];
+    drop(_t_fs);
     let gz = gamma * z;
 
+    let _t_evals =
+        profile::ScopedTimer::new(nv, n, "multi_open_eval_zgz", num_polys, "eval-f-hbar");
     let mut evals_out = Vec::with_capacity(num_polys);
     for i in 0..num_polys {
         let y_f = f_vs[i].evaluate(z);
@@ -325,13 +347,28 @@ pub(crate) fn multi_open_internal<E: Pairing>(
         transcript.append_field_element(b"y_h", &y_h)?;
         transcript.append_field_element(b"y_h'", &y_h_prime)?;
     }
+    drop(_t_evals);
 
-    // Batch all KZG quotient polynomials into a single MSM
+    let _t_fs2 = profile::ScopedTimer::new(
+        nv,
+        n,
+        "multi_open_fs_inner_outer",
+        1,
+        "transcript-challenge",
+    );
     let inner_r_buf = transcript.get_and_append_challenge_vectors(b"inner", 1)?;
     let inner_r = inner_r_buf[0];
     let outer_r_buf = transcript.get_and_append_challenge_vectors(b"outer", 1)?;
     let outer_r = outer_r_buf[0];
+    drop(_t_fs2);
 
+    let _t_quot = profile::ScopedTimer::new(
+        nv,
+        n,
+        "multi_open_quotient_construction",
+        num_polys,
+        "poly-div",
+    );
     let dummy_pts = [(z, E::ScalarField::zero()), (gz, E::ScalarField::zero())];
     let (_, z_coeffs) = build_multi_point_polys(&dummy_pts);
     let z_deg = z_coeffs.len().saturating_sub(1);
@@ -367,12 +404,12 @@ pub(crate) fn multi_open_internal<E: Pairing>(
             let f_val = if d < qf.len() {
                 qf[d]
             } else {
-                E::ScalarField::zero()
+                E::ScalarField::ZERO
             };
             let h_val = if d < qh.len() {
                 qh[d]
             } else {
-                E::ScalarField::zero()
+                E::ScalarField::ZERO
             };
             if d < q_combined.len() {
                 q_combined[d] += outer_r_pow * (f_val + inner_r * h_val);
@@ -380,8 +417,12 @@ pub(crate) fn multi_open_internal<E: Pairing>(
         }
         outer_r_pow *= outer_r;
     }
+    drop(_t_quot);
 
+    let _t_commit_q =
+        profile::ScopedTimer::new(nv, n, "multi_open_commit_q", max_q_deg + 1, "KZG-MSM-final");
     let pi = pp.commit(&q_combined);
+    drop(_t_commit_q);
 
     end_timer!(open_timer);
     Ok(MulcsBatchProof {
@@ -402,10 +443,13 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
     proof: &MulcsBatchProof<E>,
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<bool, PCSError> {
+    let num_polys = proof.num_polys;
+    let n = 1 << proof.mu;
+    let mu = proof.mu;
+    let _t_total = profile::ScopedTimer::new(mu, n, "batch_verify_total", num_polys, "total");
     let open_timer = start_timer!(|| "mulcs batch verify");
 
-    // ── Length sanity checks (return false / error, never panic) ──
-    let num_polys = proof.num_polys;
+    // ── Length sanity checks ──
     if commitments.len() != num_polys
         || points.len() != num_polys
         || proof.f_i_eval_at_point_i.len() != num_polys
@@ -416,7 +460,6 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
             "length mismatch in batch proof".to_string(),
         ));
     }
-
     for point in points {
         if point.len() != proof.mu {
             return Err(PCSError::InvalidProof(format!(
@@ -427,25 +470,31 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         }
     }
 
+    let _t_ts = profile::ScopedTimer::new(
+        mu,
+        n,
+        "batch_verify_transcript",
+        num_polys,
+        "absorb-pts-evals-hbars",
+    );
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
     for eval in proof.f_i_eval_at_point_i.iter() {
         transcript.append_field_element(b"eval", eval)?;
     }
-
     let gamma = vp.gamma;
-
     for cm_hbar in &proof.cm_hbars {
         transcript.append_serializable_element(b"h", cm_hbar)?;
     }
+    drop(_t_ts);
 
+    let _t_fs = profile::ScopedTimer::new(mu, n, "batch_verify_fs", 1, "challenges");
     let z_buf = transcript.get_and_append_challenge_vectors(b"z", 1)?;
     let z = z_buf[0];
     if z != proof.z {
         return Ok(false);
     }
-
     let gz = gamma * z;
     for (y_f, y_f_prime, y_h, y_h_prime) in &proof.mulcs_evals {
         transcript.append_field_element(b"y_f", y_f)?;
@@ -453,52 +502,56 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
         transcript.append_field_element(b"y_h", y_h)?;
         transcript.append_field_element(b"y_h'", y_h_prime)?;
     }
-
     let inner_r_buf = transcript.get_and_append_challenge_vectors(b"inner", 1)?;
     let inner_r = inner_r_buf[0];
     let outer_r_buf = transcript.get_and_append_challenge_vectors(b"outer", 1)?;
     let outer_r = outer_r_buf[0];
+    drop(_t_fs);
 
     // ── Aggregated KZG pairing check ──
+    let _t_agg =
+        profile::ScopedTimer::new(mu, n, "batch_verify_aggregate_cm", num_polys, "group-ops");
     let mut cm_combined = E::G1::zero();
     let mut outer_r_pow = E::ScalarField::one();
-
     let s = z + gz;
     let p = z * gz;
-
     for i in 0..num_polys {
         let (y_f, y_f_prime, y_h, y_h_prime) = proof.mulcs_evals[i];
         let f_pts = [(z, y_f), (gz, y_f_prime)];
         let h_pts = [(z, y_h), (gz, y_h_prime)];
         let (rf, _) = build_multi_point_polys(&f_pts);
         let (rh, _) = build_multi_point_polys(&h_pts);
-
         let mut r_comb = vec![E::ScalarField::ZERO; 2];
         for j in 0..2 {
             r_comb[j] = rf[j] + inner_r * rh[j];
         }
-
         let cm_r = vp.g1_one.into_group() * r_comb[0] + vp.g1_x.into_group() * r_comb[1];
-
         let cm_i = commitments[i].0.into_group() + proof.cm_hbars[i].into_group() * inner_r - cm_r;
-
         cm_combined += cm_i * outer_r_pow;
         outer_r_pow *= outer_r;
     }
-
     let zx_g2 = vp.g2_x2.into_group() - vp.g2_x.into_group() * s + vp.g2_one.into_group() * p;
+    drop(_t_agg);
 
+    let _t_pair = profile::ScopedTimer::new(mu, n, "batch_verify_pairing", 1, "1-pairing-check");
     if E::pairing(cm_combined.into_affine(), vp.g2_one) != E::pairing(proof.pi, zx_g2.into_affine())
     {
         end_timer!(open_timer);
         return Ok(false);
     }
+    drop(_t_pair);
 
     // ── Per-polynomial Claymore identity checks ──
+    let _t_clay = profile::ScopedTimer::new(
+        mu,
+        n,
+        "batch_verify_claymore",
+        num_polys,
+        "claymore-identity",
+    );
     for i in 0..num_polys {
         let (y_f, _y_f_prime, _y_h, y_h_prime) = proof.mulcs_evals[i];
-        let y_hbar = proof.mulcs_evals[i].2; // index 2 = y_h
-
+        let y_hbar = proof.mulcs_evals[i].2;
         let ok = check_claymore_identity(
             gamma,
             proof.mu,
@@ -514,6 +567,7 @@ pub(crate) fn batch_verify_internal<E: Pairing>(
             return Ok(false);
         }
     }
+    drop(_t_clay);
 
     end_timer!(open_timer);
     Ok(true)
@@ -526,31 +580,32 @@ fn verify_internal<E: Pairing>(
     value: &E::ScalarField,
     proof: &MulcsProof<E>,
 ) -> Result<bool, PCSError> {
+    let n = 1 << proof.mu;
+    let _t_pair = profile::ScopedTimer::new(proof.mu, n, "verify_pairing", 1, "single-pairing");
     let gamma = vp.gamma;
     let gz = gamma * proof.z;
-
-    // KZG pairing check: f_v and h̄ at (z, γz)
     let f_pts = [(proof.z, proof.y_f), (gz, proof.y_f_prime)];
     let h_pts = [(proof.z, proof.y_hbar), (gz, proof.y_hbar_prime)];
     let (rf, _) = build_multi_point_polys(&f_pts);
     let (rh, _) = build_multi_point_polys(&h_pts);
-
     let mut r_comb = vec![E::ScalarField::zero(); 2];
     for j in 0..2 {
         r_comb[j] = rf[j] + rh[j];
     }
     let cm_r = vp.g1_one.into_group() * r_comb[0] + vp.g1_x.into_group() * r_comb[1];
     let cm_comb = commitment.0.into_group() + proof.cm_hbar.into_group() - cm_r;
-
     let s = proof.z + gz;
     let p = proof.z * gz;
     let zx_g2 = vp.g2_x2.into_group() - vp.g2_x.into_group() * s + vp.g2_one.into_group() * p;
-
-    if E::pairing(cm_comb.into_affine(), vp.g2_one) != E::pairing(proof.pi, zx_g2.into_affine()) {
+    let pair_ok =
+        E::pairing(cm_comb.into_affine(), vp.g2_one) == E::pairing(proof.pi, zx_g2.into_affine());
+    drop(_t_pair);
+    if !pair_ok {
         return Ok(false);
     }
 
-    check_claymore_identity(
+    let _t_clay = profile::ScopedTimer::new(proof.mu, n, "verify_claymore", 1, "claymore-identity");
+    let result = check_claymore_identity(
         gamma,
         proof.mu,
         proof.z,
@@ -559,7 +614,9 @@ fn verify_internal<E: Pairing>(
         proof.y_hbar_prime,
         point,
         *value,
-    )
+    );
+    drop(_t_clay);
+    result
 }
 
 // ─── Claymore identity check (shared between single and batch verify) ──

@@ -4,6 +4,8 @@
 use ark_ff::Field;
 use rayon::prelude::*;
 
+use super::profile;
+
 /// A univariate polynomial c_0 + c_1·X + ... + c_d·X^d
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct UnivarPoly<F: Field> {
@@ -78,6 +80,14 @@ impl<F: Field> UnivarPoly<F> {
     /// Multiply f_v by structured_product_eq(r)
     pub fn mul_structured_eq(&self, mu: usize, r: &[F]) -> UnivarPoly<F> {
         assert_eq!(r.len(), mu);
+        let n = 1 << mu;
+        let _t = profile::ScopedTimer::new(
+            mu,
+            n,
+            "util_mul_structured_eq",
+            self.coeffs.len(),
+            "start-coeffs",
+        );
         let mut result = self.clone();
         for k in 0..mu {
             let shift = 1 << k;
@@ -100,9 +110,9 @@ impl<F: Field> UnivarPoly<F> {
     }
 
     /// Compute h(X) = f_v(X) · P_eq(X) − y · X^{N-1}
-    /// This is the core Claymore helper polynomial.
     pub fn compute_h(f_v: &[F], mu: usize, r: &[F], y: F) -> UnivarPoly<F> {
         let n = 1 << mu;
+        let _t = profile::ScopedTimer::new(mu, n, "util_compute_h", f_v.len(), "total");
         let f_poly = UnivarPoly::new(f_v.to_vec());
         let mut h = f_poly.mul_structured_eq(mu, r);
         let h_len = h.coeffs.len();
@@ -118,6 +128,10 @@ impl<F: Field> UnivarPoly<F> {
     /// Compute h̄(X): h̄_i = h_i / (γ^{N-1} - γ^i) for i≠N-1, δ at i=N-1
     pub fn compute_h_bar(h: &UnivarPoly<F>, gamma: F, n: usize, delta: F) -> UnivarPoly<F> {
         let len = h.coeffs.len();
+        let mu = n.trailing_zeros() as usize;
+
+        let _t_pow =
+            profile::ScopedTimer::new(mu, n, "util_hbar_gamma_pows", n, "compute-gamma-pows");
         let max_pow = std::cmp::max(len, n);
         let mut gamma_pows = Vec::with_capacity(max_pow);
         let mut acc = F::one();
@@ -125,8 +139,12 @@ impl<F: Field> UnivarPoly<F> {
             gamma_pows.push(acc);
             acc *= gamma;
         }
+        drop(_t_pow);
+
         let gamma_n1 = gamma_pows[n - 1];
 
+        let _t_denom =
+            profile::ScopedTimer::new(mu, n, "util_hbar_denoms", len, "build-and-invert");
         let mut inv_denoms: Vec<F> = (0..len)
             .into_par_iter()
             .map(|i| {
@@ -137,9 +155,10 @@ impl<F: Field> UnivarPoly<F> {
                 }
             })
             .collect();
-
         ark_ff::batch_inversion(&mut inv_denoms);
+        drop(_t_denom);
 
+        let _t_scale = profile::ScopedTimer::new(mu, n, "util_hbar_scale", len, "scale-coeffs");
         let coeffs: Vec<F> = h
             .coeffs
             .par_iter()
@@ -152,6 +171,7 @@ impl<F: Field> UnivarPoly<F> {
                 }
             })
             .collect();
+        drop(_t_scale);
 
         UnivarPoly::new(coeffs)
     }

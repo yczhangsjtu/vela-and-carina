@@ -4,7 +4,11 @@
 //! Uses a random field element as the structured randomness γ for
 //! the Claymore identity.
 
-use crate::pcs::{prelude::PCSError, StructuredReferenceString};
+use crate::pcs::{
+    mulcs::profile::{emit_header, emit_manual, ScopedTimer},
+    prelude::PCSError,
+    StructuredReferenceString,
+};
 use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
@@ -114,25 +118,59 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         }
 
         let max_degree = 2 * (1 << supported_num_vars); // 2N
+        let n = 1 << supported_num_vars;
+
+        emit_header();
+
+        // Phase: sample random x, g1, g2
+        let _t0 = ScopedTimer::new(supported_num_vars, n, "srs_gen_sample", 1, "random-x-g1-g2");
         let x = E::ScalarField::rand(rng);
         let g1 = E::G1::rand(rng);
         let g2 = E::G2::rand(rng);
+        drop(_t0);
 
+        // Phase: compute powers of x
+        let _t1 = ScopedTimer::new(
+            supported_num_vars,
+            n,
+            "srs_gen_x_pows",
+            max_degree + 1,
+            "field-mults",
+        );
         let mut x_pows = Vec::with_capacity(max_degree + 1);
         let mut acc = E::ScalarField::one();
         for _ in 0..=max_degree {
             x_pows.push(acc);
             acc *= x;
         }
+        drop(_t1);
 
+        // Phase: compute G1 powers (MSM)
+        let _t2 = ScopedTimer::new(
+            supported_num_vars,
+            n,
+            "srs_gen_g1_powers",
+            max_degree + 1,
+            "G1-scalar-mult",
+        );
         let g1_powers: Vec<E::G1Affine> =
             x_pows.iter().map(|&xi| (g1 * xi).into_affine()).collect();
+        drop(_t2);
 
+        // Phase: compute G2 elements
+        let _t3 = ScopedTimer::new(supported_num_vars, n, "srs_gen_g2", 3, "G2-elements");
         let g2_one = g2.into_affine();
         let g2_x = (g2 * x).into_affine();
         let g2_x2 = (g2 * x * x).into_affine();
-        let gamma = E::ScalarField::rand(rng);
+        drop(_t3);
 
+        // Phase: sample gamma
+        let _t4 = ScopedTimer::new(supported_num_vars, n, "srs_gen_gamma", 1, "gamma-field");
+        let gamma = E::ScalarField::rand(rng);
+        drop(_t4);
+
+        // Total
+        let t_total = std::time::Instant::now();
         let pp = MulcsProverParam {
             g1_powers,
             g2_one,
@@ -150,6 +188,15 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
             gamma,
             max_degree,
         };
+
+        emit_manual(
+            supported_num_vars,
+            n,
+            "srs_gen_total",
+            t_total.elapsed().as_secs_f64() * 1000.0,
+            max_degree + 1,
+            "g1_powers.len",
+        );
 
         Ok(MulcsUniversalParams {
             prover_param: pp,
