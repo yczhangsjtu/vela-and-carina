@@ -27,7 +27,7 @@ use transcript::IOPTranscript;
 
 use self::util::UnivarPoly;
 
-pub(crate) mod profile;
+use crate::pcs::profile;
 pub(crate) mod srs;
 mod util;
 
@@ -89,10 +89,10 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
                 pp.max_degree
             )));
         }
-        let _t = profile::ScopedTimer::new(nv, n, "commit_to_evals", n, "to_evaluations");
+        let _t = profile::ScopedTimer::new("Mulcs", nv, n, "commit_to_evals", n, "to_evaluations");
         let scalars = poly.to_evaluations();
         drop(_t);
-        let _t = profile::ScopedTimer::new(nv, n, "commit_msm", scalars.len(), "KZG-MSM");
+        let _t = profile::ScopedTimer::new("Mulcs", nv, n, "commit_msm", scalars.len(), "KZG-MSM");
         let cm = pp.commit(&scalars);
         drop(_t);
         Ok(Commitment(cm))
@@ -156,9 +156,10 @@ pub(crate) fn open_with_transcript<E: Pairing>(
     let mu = nv;
     let gamma = pp.gamma;
 
-    let _t_total = profile::ScopedTimer::new(mu, n, "mulcs_open_total", 1, "total");
+    let _t_total = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_total", 1, "total");
 
-    let _t_evals = profile::ScopedTimer::new(mu, n, "mulcs_open_to_evals", n, "to_evaluations");
+    let _t_evals =
+        profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_to_evals", n, "to_evaluations");
     let coeffs = polynomial.to_evaluations();
     let f_v = UnivarPoly::new(coeffs.clone());
     let y = polynomial
@@ -166,20 +167,29 @@ pub(crate) fn open_with_transcript<E: Pairing>(
         .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
     drop(_t_evals);
 
-    let _t_h = profile::ScopedTimer::new(mu, n, "mulcs_open_compute_h", 1, "Claymore-h");
+    let _t_h = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_compute_h", 1, "Claymore-h");
     let h = UnivarPoly::compute_h(&coeffs, mu, point, y);
     drop(_t_h);
 
-    let _t_delta = profile::ScopedTimer::new(mu, n, "mulcs_open_derive_delta", 1, "FS-challenge");
+    let _t_delta =
+        profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_derive_delta", 1, "FS-challenge");
     let delta_buf = transcript.get_and_append_challenge_vectors(b"mulcs_delta", 1)?;
     let delta = delta_buf[0];
     drop(_t_delta);
 
-    let _t_hbar = profile::ScopedTimer::new(mu, n, "mulcs_open_compute_h_bar", 1, "Claymore-hbar");
+    let _t_hbar = profile::ScopedTimer::new(
+        "Mulcs",
+        mu,
+        n,
+        "mulcs_open_compute_h_bar",
+        1,
+        "Claymore-hbar",
+    );
     let h_bar = UnivarPoly::compute_h_bar(&h, gamma, n, delta);
     drop(_t_hbar);
 
     let _t_cm_hbar = profile::ScopedTimer::new(
+        "Mulcs",
         mu,
         n,
         "mulcs_open_commit_hbar",
@@ -191,12 +201,13 @@ pub(crate) fn open_with_transcript<E: Pairing>(
 
     transcript.append_serializable_element(b"cm_hbar", &cm_hbar)?;
 
-    let _t_z = profile::ScopedTimer::new(mu, n, "mulcs_open_derive_z", 1, "FS-challenge");
+    let _t_z = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_derive_z", 1, "FS-challenge");
     let z_buf = transcript.get_and_append_challenge_vectors(b"mulcs_z", 1)?;
     let z = z_buf[0];
     drop(_t_z);
 
-    let _t_evals_z = profile::ScopedTimer::new(mu, n, "mulcs_open_eval_at_z", 4, "Horner-evals");
+    let _t_evals_z =
+        profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_open_eval_at_z", 4, "Horner-evals");
     let gz = gamma * z;
     let y_f = f_v.evaluate(z);
     let y_f_prime = f_v.evaluate(gz);
@@ -249,8 +260,14 @@ fn mulcs_batch_kzg_open_profiled<E: Pairing>(
     n: usize,
 ) -> (E::G1Affine, Vec<E::ScalarField>, Vec<E::ScalarField>) {
     let gz = gamma * z;
-    let _t_quot =
-        profile::ScopedTimer::new(mu, n, "mulcs_open_build_quotients", 1, "lagrange+poly-div");
+    let _t_quot = profile::ScopedTimer::new(
+        "Mulcs",
+        mu,
+        n,
+        "mulcs_open_build_quotients",
+        1,
+        "lagrange+poly-div",
+    );
     let f_pts = [(z, y_f), (gz, y_f_prime)];
     let h_pts = [(z, y_h), (gz, y_h_prime)];
     let (rf, z_coeffs) = build_multi_point_polys(&f_pts);
@@ -267,8 +284,14 @@ fn mulcs_batch_kzg_open_profiled<E: Pairing>(
     }
     drop(_t_quot);
 
-    let _t_pi =
-        profile::ScopedTimer::new(mu, n, "mulcs_open_commit_pi", max_deg + 1, "KZG-commit-pi");
+    let _t_pi = profile::ScopedTimer::new(
+        "Mulcs",
+        mu,
+        n,
+        "mulcs_open_commit_pi",
+        max_deg + 1,
+        "KZG-commit-pi",
+    );
     let pi = pp.commit(&q_comb);
     drop(_t_pi);
     (pi, rf, rh)
@@ -290,7 +313,7 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
     let n = 1 << mu;
     let gamma = vp.gamma;
 
-    let _t_total = profile::ScopedTimer::new(mu, n, "mulcs_verify_total", 1, "total");
+    let _t_total = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_total", 1, "total");
 
     let delta_buf = transcript.get_and_append_challenge_vectors(b"mulcs_delta", 1)?;
     let _delta = delta_buf[0];
@@ -301,7 +324,7 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
         return Ok(false);
     }
 
-    let _t_pair = profile::ScopedTimer::new(mu, n, "mulcs_verify_pairing", 1, "1-pairing");
+    let _t_pair = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_pairing", 1, "1-pairing");
     let gz = gamma * z;
     let f_pts = [(z, proof.y_f), (gz, proof.y_f_prime)];
     let h_pts = [(z, proof.y_hbar), (gz, proof.y_hbar_prime)];
@@ -323,7 +346,7 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
         return Ok(false);
     }
 
-    let _t_clay = profile::ScopedTimer::new(mu, n, "mulcs_verify_claymore", 1, "claymore");
+    let _t_clay = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_claymore", 1, "claymore");
     let result = check_claymore_identity(
         gamma,
         mu,
@@ -366,7 +389,8 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     let num_var = polynomials[0].num_vars;
     let n = 1 << num_var;
     let k = polynomials.len();
-    let _t_total = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_total", k, "total");
+    let _t_total =
+        profile::ScopedTimer::new("Mulcs", num_var, n, "mulcs_multi_open_total", k, "total");
 
     for poly in polynomials {
         if poly.num_vars != num_var {
@@ -387,6 +411,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     }
 
     let _t_abs = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_multi_open_transcript_absorb",
@@ -402,7 +427,14 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     drop(_t_abs);
 
     let ell = log2(k) as usize;
-    let _t_eq = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_build_eq_t", k, "eq(t;i)");
+    let _t_eq = profile::ScopedTimer::new(
+        "Mulcs",
+        num_var,
+        n,
+        "mulcs_multi_open_build_eq_t",
+        k,
+        "eq(t;i)",
+    );
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let eq_t_i_list = if ell == 0 {
         vec![E::ScalarField::one()]
@@ -412,6 +444,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     drop(_t_eq);
 
     let _t_groups = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_multi_open_group_points",
@@ -429,6 +462,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     drop(_t_groups);
 
     let _t_merge = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_multi_open_merge_polys",
@@ -452,6 +486,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     drop(_t_merge);
 
     let _t_tilde = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_multi_open_build_tilde_eqs",
@@ -468,6 +503,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     drop(_t_tilde);
 
     let _t_sc = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_multi_open_sumcheck_prove",
@@ -489,7 +525,14 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
 
     let a2 = &proof.point[..num_var];
 
-    let _t_g = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_build_g_prime", 1, "g'=sum");
+    let _t_g = profile::ScopedTimer::new(
+        "Mulcs",
+        num_var,
+        n,
+        "mulcs_multi_open_build_g_prime",
+        1,
+        "g'=sum",
+    );
     let mut g_prime = Arc::new(DenseMultilinearExtension::zero());
     for (g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
         let eq = eq_eval(a2, point)?;
@@ -532,10 +575,17 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     let k = f_i_commitments.len();
     let num_var = proof.sum_check_proof.point.len();
     let n = 1 << num_var;
-    let _t_total =
-        profile::ScopedTimer::new(num_var, n, "mulcs_batch_verify_total", k, "sumcheck-batch");
+    let _t_total = profile::ScopedTimer::new(
+        "Mulcs",
+        num_var,
+        n,
+        "mulcs_batch_verify_total",
+        k,
+        "sumcheck-batch",
+    );
 
     let _t_abs = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_batch_verify_transcript_absorb",
@@ -570,6 +620,7 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     };
 
     let _t_gc = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_batch_verify_build_g_prime_commit",
@@ -586,6 +637,7 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     drop(_t_gc);
 
     let _t_sc = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_batch_verify_sumcheck_verify",
@@ -617,6 +669,7 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     drop(_t_sc);
 
     let _t_open = profile::ScopedTimer::new(
+        "Mulcs",
         num_var,
         n,
         "mulcs_batch_verify_final_open",

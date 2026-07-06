@@ -1,7 +1,7 @@
-//! Lightweight profiling helper for MulcsPCS.
+//! Lightweight profiling helper for all PCS backends.
 //!
-//! Controlled by env var `MULCS_PROFILE=1`. When disabled, all operations are
-//! near-zero-cost (no Instant::now(), no env reads after first check).
+//! Controlled by env var `PCS_PROFILE=1` (or legacy `MULCS_PROFILE=1`).
+//! When disabled, all operations are near-zero-cost.
 //! Outputs CSV lines to stdout, unified 9-column schema:
 //! `source,backend,nv,N,repeat,phase,elapsed_ms,count,notes`
 
@@ -15,7 +15,8 @@ static PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn profiling_enabled() -> bool {
     if !PROFILE_CHECKED.load(Ordering::Relaxed) {
-        let active = std::env::var("MULCS_PROFILE").unwrap_or_default() == "1";
+        let active = std::env::var("PCS_PROFILE").unwrap_or_default() == "1"
+            || std::env::var("MULCS_PROFILE").unwrap_or_default() == "1";
         PROFILE_ACTIVE.store(active, Ordering::Relaxed);
         PROFILE_CHECKED.store(true, Ordering::Relaxed);
         active
@@ -26,7 +27,7 @@ pub(crate) fn profiling_enabled() -> bool {
 
 /// Emit a profiling CSV row to stdout (unified 9-column schema).
 fn emit_csv(backend: &str, nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
-    println!("mulcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
+    println!("pcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
 }
 
 #[allow(dead_code)]
@@ -50,6 +51,7 @@ pub(crate) struct ScopedTimer {
 
 impl ScopedTimer {
     pub(crate) fn new(
+        backend: &'static str,
         nv: usize,
         n: usize,
         phase: &'static str,
@@ -62,7 +64,7 @@ impl ScopedTimer {
             None
         };
         ScopedTimer {
-            backend: "Mulcs",
+            backend,
             nv,
             n,
             phase,
@@ -90,10 +92,17 @@ impl Drop for ScopedTimer {
 }
 
 /// Manual emit — for phases where you want to emit without a scoped guard.
-#[allow(dead_code)]
-pub(crate) fn emit_manual(nv: usize, n: usize, phase: &str, ms: f64, count: usize, notes: &str) {
+pub(crate) fn emit_manual(
+    backend: &str,
+    nv: usize,
+    n: usize,
+    phase: &str,
+    ms: f64,
+    count: usize,
+    notes: &str,
+) {
     if profiling_enabled() {
-        emit_csv("Mulcs", nv, n, phase, ms, count, notes);
+        emit_csv(backend, nv, n, phase, ms, count, notes);
     }
 }
 
@@ -115,7 +124,6 @@ impl MaybeTimer {
             acc_ns: 0,
         }
     }
-
     pub(crate) fn start(&self) -> MaybeTick {
         MaybeTick {
             t0: if self.active {
@@ -125,7 +133,6 @@ impl MaybeTimer {
             },
         }
     }
-
     pub(crate) fn add(&mut self, tick: &MaybeTick) {
         if self.active {
             if let Some(t0) = tick.t0 {
@@ -133,7 +140,6 @@ impl MaybeTimer {
             }
         }
     }
-
     pub(crate) fn ns(&self) -> u128 {
         self.acc_ns
     }

@@ -14,7 +14,7 @@
 //!
 //! Reference: han0110/plonkish (MIT-licensed).
 
-use crate::pcs::{mulcs::profile::ScopedTimer, prelude::PCSError, StructuredReferenceString};
+use crate::pcs::{prelude::PCSError, profile::ScopedTimer, StructuredReferenceString};
 use ark_ec::{
     pairing::Pairing,
     scalar_mul::{fixed_base::FixedBase, variable_base::VariableBaseMSM},
@@ -125,6 +125,7 @@ impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
 
         // G1 powers via FixedBase MSM
         let _t_g1 = ScopedTimer::new(
+            "Zeromorph",
             supported_num_vars,
             poly_size,
             "zeromorph_srs_g1_powers",
@@ -139,6 +140,7 @@ impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
 
         // G2 powers via FixedBase MSM (reuses same x_pows as G1)
         let _t_g2 = ScopedTimer::new(
+            "Zeromorph",
             supported_num_vars,
             poly_size,
             "zeromorph_srs_g2_powers",

@@ -25,7 +25,7 @@ use ark_std::{
 use std::{collections::BTreeMap, iter, ops::Deref};
 use transcript::IOPTranscript;
 
-use crate::pcs::{mulcs::profile, multilinear_kzg::batching::BatchProof};
+use crate::pcs::{multilinear_kzg::batching::BatchProof, profile};
 use srs::{ZeromorphProverParam, ZeromorphUniversalParams, ZeromorphVerifierParam};
 
 pub(crate) mod srs;
@@ -251,6 +251,7 @@ fn open_with_transcript<E: Pairing>(
 
     // 1. Compute quotients
     let _t_quotients = profile::ScopedTimer::new(
+        "Zeromorph",
         num_vars,
         n,
         "zeromorph_open_compute_quotients",
@@ -261,6 +262,7 @@ fn open_with_transcript<E: Pairing>(
     drop(_t_quotients);
 
     let _t_qcomms = profile::ScopedTimer::new(
+        "Zeromorph",
         num_vars,
         n,
         "zeromorph_open_commit_qs",
@@ -277,8 +279,26 @@ fn open_with_transcript<E: Pairing>(
     let y = transcript.get_and_append_challenge_vectors(b"y", 1)?[0];
 
     // 4. Form and commit q_hat
+    let _t_fqh = profile::ScopedTimer::new(
+        "Zeromorph",
+        num_vars,
+        n,
+        "zeromorph_open_form_q_hat",
+        1,
+        "form-q-hat",
+    );
     let q_hat = form_q_hat::<E::ScalarField>(&quotients, y, n);
+    drop(_t_fqh);
+    let _t_cqh = profile::ScopedTimer::new(
+        "Zeromorph",
+        num_vars,
+        n,
+        "zeromorph_open_commit_q_hat",
+        1,
+        "KZG-commit-q-hat",
+    );
     let q_hat_comm = pp.commit_commit(&q_hat);
+    drop(_t_cqh);
     transcript.append_serializable_element(b"q_hat_comm", &q_hat_comm)?;
 
     // 5. Challenges x, z
@@ -289,7 +309,14 @@ fn open_with_transcript<E: Pairing>(
     let (eval_scalar, q_scalars) = eval_and_quotient_scalars(y, x, z, point);
 
     // 7. Build f(X) such that f(x) = 0
-    let _t_f = profile::ScopedTimer::new(num_vars, n, "zeromorph_open_build_f", 1, "build-f");
+    let _t_f = profile::ScopedTimer::new(
+        "Zeromorph",
+        num_vars,
+        n,
+        "zeromorph_open_build_f",
+        1,
+        "build-f",
+    );
     let mut f = vec![E::ScalarField::zero(); n];
     for i in 0..coeffs.len() {
         f[i] += z * coeffs[i];
@@ -306,8 +333,14 @@ fn open_with_transcript<E: Pairing>(
     drop(_t_f);
 
     // 8. KZG open f at x using open_pp (shifted SRS)
-    let _t_kzg_q =
-        profile::ScopedTimer::new(num_vars, n, "zeromorph_open_kzg_quotient", 1, "kzg-q");
+    let _t_kzg_q = profile::ScopedTimer::new(
+        "Zeromorph",
+        num_vars,
+        n,
+        "zeromorph_open_kzg_quotient",
+        1,
+        "kzg-q",
+    );
     let mut q_open = vec![E::ScalarField::zero(); n - 1];
     let mut carry = E::ScalarField::zero();
     for i in (1..n).rev() {
@@ -315,8 +348,17 @@ fn open_with_transcript<E: Pairing>(
         q_open[i - 1] = term;
         carry = term * x;
     }
-    let kzg_proof = pp.commit_open(&q_open);
     drop(_t_kzg_q);
+    let _t_pi = profile::ScopedTimer::new(
+        "Zeromorph",
+        num_vars,
+        n,
+        "zeromorph_open_commit_pi",
+        n - 1,
+        "KZG-commit-pi",
+    );
+    let kzg_proof = pp.commit_open(&q_open);
+    drop(_t_pi);
 
     let proof = ZeromorphProof {
         q_comms,
@@ -361,6 +403,7 @@ fn verify_with_transcript<E: Pairing>(
 
     // Form aggregated commitment c
     let _t_msm = profile::ScopedTimer::new(
+        "Zeromorph",
         num_vars,
         1 << num_vars,
         "zeromorph_verify_msm",
@@ -378,6 +421,7 @@ fn verify_with_transcript<E: Pairing>(
 
     // Pairing check: e(C, s_offset_g2) == e(π, s_g2 - x*g2)
     let _t_pair = profile::ScopedTimer::new(
+        "Zeromorph",
         num_vars,
         1 << num_vars,
         "zeromorph_verify_pairing",

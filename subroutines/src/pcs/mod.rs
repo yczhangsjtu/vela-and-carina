@@ -7,6 +7,7 @@
 mod errors;
 mod mulcs;
 mod multilinear_kzg;
+pub(crate) mod profile;
 mod structs;
 mod univariate_kzg;
 mod zeromorph;

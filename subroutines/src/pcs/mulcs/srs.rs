@@ -3,7 +3,7 @@
 //! Wraps univariate KZG SRS. SRS generation is for testing only.
 //! Uses FixedBase MSM for G1 powers generation (same approach as mKZG).
 
-use crate::pcs::{mulcs::profile::ScopedTimer, prelude::PCSError, StructuredReferenceString};
+use crate::pcs::{prelude::PCSError, profile::ScopedTimer, StructuredReferenceString};
 use ark_ec::{
     pairing::Pairing,
     scalar_mul::{fixed_base::FixedBase, variable_base::VariableBaseMSM},
@@ -122,6 +122,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
 
         // Total timer
         let _t_total = ScopedTimer::new(
+            "Mulcs",
             supported_num_vars,
             n,
             "srs_gen_total",
@@ -130,7 +131,14 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         );
 
         // Phase: sample random x, g1, g2
-        let _t0 = ScopedTimer::new(supported_num_vars, n, "srs_gen_sample", 1, "random-x-g1-g2");
+        let _t0 = ScopedTimer::new(
+            "Mulcs",
+            supported_num_vars,
+            n,
+            "srs_gen_sample",
+            1,
+            "random-x-g1-g2",
+        );
         let x = E::ScalarField::rand(rng);
         let g1 = E::G1::rand(rng);
         let g2 = E::G2::rand(rng);
@@ -138,6 +146,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
 
         // Phase: compute powers of x
         let _t1 = ScopedTimer::new(
+            "Mulcs",
             supported_num_vars,
             n,
             "srs_gen_x_pows",
@@ -154,6 +163,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
 
         // Phase: compute G1 powers using FixedBase MSM (same approach as mKZG SRS)
         let _t2 = ScopedTimer::new(
+            "Mulcs",
             supported_num_vars,
             n,
             "srs_gen_g1_powers",
@@ -168,14 +178,28 @@ impl<E: Pairing> StructuredReferenceString<E> for MulcsUniversalParams<E> {
         drop(_t2);
 
         // Phase: compute G2 elements
-        let _t3 = ScopedTimer::new(supported_num_vars, n, "srs_gen_g2", 3, "G2-elements");
+        let _t3 = ScopedTimer::new(
+            "Mulcs",
+            supported_num_vars,
+            n,
+            "srs_gen_g2",
+            3,
+            "G2-elements",
+        );
         let g2_one = g2.into_affine();
         let g2_x = (g2 * x).into_affine();
         let g2_x2 = (g2 * x * x).into_affine();
         drop(_t3);
 
         // Phase: sample gamma
-        let _t4 = ScopedTimer::new(supported_num_vars, n, "srs_gen_gamma", 1, "gamma-field");
+        let _t4 = ScopedTimer::new(
+            "Mulcs",
+            supported_num_vars,
+            n,
+            "srs_gen_gamma",
+            1,
+            "gamma-field",
+        );
         let gamma = E::ScalarField::rand(rng);
         drop(_t4);
 
