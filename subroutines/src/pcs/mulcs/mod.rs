@@ -1,9 +1,7 @@
-//! Mulcs PCS implementation — Claymore identity-based multilinear PCS
-//! using univariate KZG as the black-box commitment scheme.
+//! Mulcs PCS — Claymore identity-based multilinear PCS with sumcheck batching.
 //!
-//! Batch opening: Mulcs-specific sumcheck batching that reduces multiple
-//! openings to a single opening of an aggregated polynomial g', then
-//! opens g' at the sumcheck point via transcript-aware Mulcs single open.
+//! Batch opening: Mulcs-specific sumcheck batching reduces multiple openings
+//! to a single opening of an aggregated polynomial g'.
 
 use crate::{
     pcs::{
@@ -21,7 +19,7 @@ use ark_ff::Field;
 use ark_poly::MultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
-    borrow::Borrow, end_timer, format, log2, marker::PhantomData, rand::Rng, start_timer,
+    borrow::Borrow, format, log2, marker::PhantomData, rand::Rng,
     string::ToString, sync::Arc, vec, vec::Vec, One, Zero,
 };
 use std::{collections::BTreeMap, iter, ops::Deref};
@@ -35,13 +33,10 @@ mod util;
 
 use srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam};
 
-/// Mulcs Polynomial Commitment Scheme on multilinear polynomials.
 pub struct MulcsPCS<E: Pairing> {
-    #[doc(hidden)]
     phantom: PhantomData<E>,
 }
 
-/// Single-opening proof. Contains the Claymore identity components.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MulcsProof<E: Pairing> {
     pub cm_hbar: E::G1Affine,
@@ -67,115 +62,89 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
     type Proof = MulcsProof<E>;
     type BatchProof = BatchProof<E, Self>;
 
-    fn gen_srs_for_testing<R: Rng>(
-        rng: &mut R,
-        supported_size: usize,
-    ) -> Result<Self::SRS, PCSError> {
-        MulcsUniversalParams::<E>::gen_srs_for_testing(rng, supported_size)
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, s: usize) -> Result<Self::SRS, PCSError> {
+        MulcsUniversalParams::<E>::gen_srs_for_testing(rng, s)
     }
 
     fn trim(
         srs: impl Borrow<Self::SRS>,
-        _supported_degree: Option<usize>,
-        supported_num_vars: Option<usize>,
+        _d: Option<usize>,
+        nv: Option<usize>,
     ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
-        let supported_num_vars = match supported_num_vars {
-            Some(p) => p,
-            None => {
-                return Err(PCSError::InvalidParameters(
-                    "mulcs should receive a num_var param".to_string(),
-                ))
-            },
-        };
-        let max_degree = 2 * (1 << supported_num_vars);
-        srs.borrow().trim(max_degree)
+        let nv = nv.ok_or_else(|| PCSError::InvalidParameters("need num_var".to_string()))?;
+        srs.borrow().trim(2 * (1 << nv))
     }
 
     fn commit(
-        prover_param: impl Borrow<Self::ProverParam>,
+        pp: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
     ) -> Result<Self::Commitment, PCSError> {
-        let pp = prover_param.borrow();
+        let pp = pp.borrow();
         let nv = poly.num_vars;
         let n = 1 << nv;
-        let commit_timer = start_timer!(|| "mulcs commit");
         if pp.max_degree < n - 1 {
             return Err(PCSError::InvalidParameters(format!(
-                "poly degree {} exceeds SRS max {}",
+                "degree {} > max {}",
                 n - 1,
                 pp.max_degree
             )));
         }
-        let _t_eval = profile::ScopedTimer::new(nv, n, "commit_to_evals", n, "to_evaluations");
+        let _t = profile::ScopedTimer::new(nv, n, "commit_to_evals", n, "to_evaluations");
         let scalars = poly.to_evaluations();
-        drop(_t_eval);
-        let _t_msm = profile::ScopedTimer::new(nv, n, "commit_msm", scalars.len(), "KZG-MSM");
+        drop(_t);
+        let _t = profile::ScopedTimer::new(nv, n, "commit_msm", scalars.len(), "KZG-MSM");
         let cm = pp.commit(&scalars);
-        drop(_t_msm);
-        end_timer!(commit_timer);
+        drop(_t);
         Ok(Commitment(cm))
     }
 
-    /// Standalone open (no transcript). Wraps a local transcript for FS
-    /// security.
     fn open(
-        prover_param: impl Borrow<Self::ProverParam>,
-        polynomial: &Self::Polynomial,
+        pp: impl Borrow<Self::ProverParam>,
+        poly: &Self::Polynomial,
         point: &Self::Point,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
         let mut t = IOPTranscript::new(b"mulcs-open");
-        t.append_field_element(b"mu", &E::ScalarField::from(polynomial.num_vars as u64))?;
-        open_with_transcript(prover_param.borrow(), polynomial, point, &mut t)
+        t.append_field_element(b"mu", &E::ScalarField::from(poly.num_vars as u64))?;
+        open_with_transcript(pp.borrow(), poly, point, &mut t)
     }
 
     fn multi_open(
-        prover_param: impl Borrow<Self::ProverParam>,
-        polynomials: &[Self::Polynomial],
+        pp: impl Borrow<Self::ProverParam>,
+        polys: &[Self::Polynomial],
         points: &[Self::Point],
         evals: &[Self::Evaluation],
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<Self::BatchProof, PCSError> {
-        mulcs_sumcheck_multi_open(
-            prover_param.borrow(),
-            polynomials,
-            points,
-            evals,
-            transcript,
-        )
+        mulcs_sumcheck_multi_open(pp.borrow(), polys, points, evals, transcript)
     }
 
-    /// Standalone verify (no transcript). Wraps a local transcript for FS
-    /// security.
     fn verify(
-        verifier_param: &Self::VerifierParam,
-        commitment: &Self::Commitment,
+        vp: &Self::VerifierParam,
+        com: &Self::Commitment,
         point: &Self::Point,
-        value: &E::ScalarField,
+        val: &E::ScalarField,
         proof: &Self::Proof,
     ) -> Result<bool, PCSError> {
         let mut t = IOPTranscript::new(b"mulcs-open");
         t.append_field_element(b"mu", &E::ScalarField::from(proof.mu as u64))?;
-        verify_with_transcript(verifier_param, commitment, point, value, proof, &mut t)
+        verify_with_transcript(vp, com, point, val, proof, &mut t)
     }
 
     fn batch_verify(
-        verifier_param: &Self::VerifierParam,
-        commitments: &[Self::Commitment],
+        vp: &Self::VerifierParam,
+        coms: &[Self::Commitment],
         points: &[Self::Point],
-        batch_proof: &Self::BatchProof,
+        bp: &Self::BatchProof,
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<bool, PCSError> {
-        mulcs_sumcheck_batch_verify(verifier_param, commitments, points, batch_proof, transcript)
+        mulcs_sumcheck_batch_verify(vp, coms, points, bp, transcript)
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Transcript-aware Mulcs single opening
+// Transcript-aware single opening (profiled)
 // ═══════════════════════════════════════════════════════════════════
 
-/// Transcript-aware Mulcs opening.
-/// Transcript must already contain the opening point and claimed value.
-/// This function appends cm_hbar, then derives z and delta from transcript.
 pub(crate) fn open_with_transcript<E: Pairing>(
     pp: &MulcsProverParam<E>,
     polynomial: &Arc<DenseMultilinearExtension<E::ScalarField>>,
@@ -187,33 +156,55 @@ pub(crate) fn open_with_transcript<E: Pairing>(
     let mu = nv;
     let gamma = pp.gamma;
 
+    let _t_total = profile::ScopedTimer::new(mu, n, "mulcs_open_total", 1, "total");
+
+    let _t_evals = profile::ScopedTimer::new(mu, n, "mulcs_open_to_evals", n, "to_evaluations");
     let coeffs = polynomial.to_evaluations();
     let f_v = UnivarPoly::new(coeffs.clone());
     let y = polynomial
         .evaluate(point)
         .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
+    drop(_t_evals);
 
+    let _t_h = profile::ScopedTimer::new(mu, n, "mulcs_open_compute_h", 1, "Claymore-h");
     let h = UnivarPoly::compute_h(&coeffs, mu, point, y);
+    drop(_t_h);
 
-    // Derive delta from transcript (Fiat-Shamir)
+    let _t_delta = profile::ScopedTimer::new(mu, n, "mulcs_open_derive_delta", 1, "FS-challenge");
     let delta_buf = transcript.get_and_append_challenge_vectors(b"mulcs_delta", 1)?;
     let delta = delta_buf[0];
+    drop(_t_delta);
 
+    let _t_hbar = profile::ScopedTimer::new(mu, n, "mulcs_open_compute_h_bar", 1, "Claymore-hbar");
     let h_bar = UnivarPoly::compute_h_bar(&h, gamma, n, delta);
+    drop(_t_hbar);
+
+    let _t_cm_hbar = profile::ScopedTimer::new(
+        mu,
+        n,
+        "mulcs_open_commit_hbar",
+        h_bar.coeffs.len(),
+        "KZG-commit-hbar",
+    );
     let cm_hbar = pp.commit(&h_bar.coeffs);
+    drop(_t_cm_hbar);
+
     transcript.append_serializable_element(b"cm_hbar", &cm_hbar)?;
 
-    // Derive z from transcript (Fiat-Shamir)
+    let _t_z = profile::ScopedTimer::new(mu, n, "mulcs_open_derive_z", 1, "FS-challenge");
     let z_buf = transcript.get_and_append_challenge_vectors(b"mulcs_z", 1)?;
     let z = z_buf[0];
+    drop(_t_z);
 
+    let _t_evals_z = profile::ScopedTimer::new(mu, n, "mulcs_open_eval_at_z", 4, "Horner-evals");
     let gz = gamma * z;
     let y_f = f_v.evaluate(z);
     let y_f_prime = f_v.evaluate(gz);
     let y_hbar = h_bar.evaluate(z);
     let y_hbar_prime = h_bar.evaluate(gz);
+    drop(_t_evals_z);
 
-    let (pi, rf, rh) = mulcs_batch_kzg_open(
+    let (pi, rf, rh) = mulcs_batch_kzg_open_profiled(
         pp,
         &f_v,
         &h_bar,
@@ -223,6 +214,8 @@ pub(crate) fn open_with_transcript<E: Pairing>(
         y_f_prime,
         y_hbar,
         y_hbar_prime,
+        mu,
+        n,
     );
 
     let proof = MulcsProof {
@@ -237,12 +230,54 @@ pub(crate) fn open_with_transcript<E: Pairing>(
         rh,
         mu,
     };
+    drop(_t_total);
     Ok((proof, y))
 }
 
-/// Transcript-aware Mulcs verification.
-/// Transcript must already contain the opening point and claimed value.
-/// Replays transcript to derive z and delta, then verifies KZG + Claymore.
+/// Profiled version of mulcs_batch_kzg_open with nv/n for accurate CSV.
+fn mulcs_batch_kzg_open_profiled<E: Pairing>(
+    pp: &MulcsProverParam<E>,
+    f_v: &UnivarPoly<E::ScalarField>,
+    h_bar: &UnivarPoly<E::ScalarField>,
+    z: E::ScalarField,
+    gamma: E::ScalarField,
+    y_f: E::ScalarField,
+    y_f_prime: E::ScalarField,
+    y_h: E::ScalarField,
+    y_h_prime: E::ScalarField,
+    mu: usize,
+    n: usize,
+) -> (E::G1Affine, Vec<E::ScalarField>, Vec<E::ScalarField>) {
+    let gz = gamma * z;
+    let _t_quot =
+        profile::ScopedTimer::new(mu, n, "mulcs_open_build_quotients", 1, "lagrange+poly-div");
+    let f_pts = [(z, y_f), (gz, y_f_prime)];
+    let h_pts = [(z, y_h), (gz, y_h_prime)];
+    let (rf, z_coeffs) = build_multi_point_polys(&f_pts);
+    let (rh, _) = build_multi_point_polys(&h_pts);
+    let qf = poly_sub_div(&f_v.coeffs, &rf, &z_coeffs);
+    let qh = poly_sub_div(&h_bar.coeffs, &rh, &z_coeffs);
+    let max_deg = qf.len().max(qh.len());
+    let mut q_comb = vec![E::ScalarField::zero(); max_deg];
+    for i in 0..qf.len() {
+        q_comb[i] += qf[i];
+    }
+    for i in 0..qh.len() {
+        q_comb[i] += qh[i];
+    }
+    drop(_t_quot);
+
+    let _t_pi =
+        profile::ScopedTimer::new(mu, n, "mulcs_open_commit_pi", max_deg + 1, "KZG-commit-pi");
+    let pi = pp.commit(&q_comb);
+    drop(_t_pi);
+    (pi, rf, rh)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Transcript-aware single verification (profiled)
+// ═══════════════════════════════════════════════════════════════════
+
 pub(crate) fn verify_with_transcript<E: Pairing>(
     vp: &MulcsVerifierParam<E>,
     commitment: &Commitment<E>,
@@ -255,44 +290,40 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
     let n = 1 << mu;
     let gamma = vp.gamma;
 
-    // Replay transcript to get delta
+    let _t_total = profile::ScopedTimer::new(mu, n, "mulcs_verify_total", 1, "total");
+
     let delta_buf = transcript.get_and_append_challenge_vectors(b"mulcs_delta", 1)?;
-    let _delta = delta_buf[0]; // verifier doesn't need delta value
-
+    let _delta = delta_buf[0];
     transcript.append_serializable_element(b"cm_hbar", &proof.cm_hbar)?;
-
-    // Replay transcript to get z
     let z_buf = transcript.get_and_append_challenge_vectors(b"mulcs_z", 1)?;
     let z = z_buf[0];
     if z != proof.z {
         return Ok(false);
     }
 
-    // KZG pairing check
-    let _t_pair = profile::ScopedTimer::new(mu, n, "verify_pairing", 1, "single-pairing");
+    let _t_pair = profile::ScopedTimer::new(mu, n, "mulcs_verify_pairing", 1, "1-pairing");
     let gz = gamma * z;
     let f_pts = [(z, proof.y_f), (gz, proof.y_f_prime)];
     let h_pts = [(z, proof.y_hbar), (gz, proof.y_hbar_prime)];
     let (rf, _) = build_multi_point_polys(&f_pts);
     let (rh, _) = build_multi_point_polys(&h_pts);
-    let mut r_comb = vec![E::ScalarField::zero(); 2];
+    let mut r = vec![E::ScalarField::zero(); 2];
     for j in 0..2 {
-        r_comb[j] = rf[j] + rh[j];
+        r[j] = rf[j] + rh[j];
     }
-    let cm_r = vp.g1_one.into_group() * r_comb[0] + vp.g1_x.into_group() * r_comb[1];
+    let cm_r = vp.g1_one.into_group() * r[0] + vp.g1_x.into_group() * r[1];
     let cm_comb = commitment.0.into_group() + proof.cm_hbar.into_group() - cm_r;
     let s = z + gz;
     let p = z * gz;
     let zx_g2 = vp.g2_x2.into_group() - vp.g2_x.into_group() * s + vp.g2_one.into_group() * p;
-    let pair_ok =
+    let ok =
         E::pairing(cm_comb.into_affine(), vp.g2_one) == E::pairing(proof.pi, zx_g2.into_affine());
     drop(_t_pair);
-    if !pair_ok {
+    if !ok {
         return Ok(false);
     }
 
-    // Claymore identity
-    let _t_clay = profile::ScopedTimer::new(mu, n, "verify_claymore", 1, "claymore-identity");
+    let _t_clay = profile::ScopedTimer::new(mu, n, "mulcs_verify_claymore", 1, "claymore");
     let result = check_claymore_identity(
         gamma,
         mu,
@@ -304,15 +335,14 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
         *value,
     );
     drop(_t_clay);
+    drop(_t_total);
     result
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Mulcs-specific sumcheck batching
+// Sumcheck batch open (profiled)
 // ═══════════════════════════════════════════════════════════════════
 
-/// Mulcs-specific sumcheck batch open. Same logic as generic sumcheck batcher
-/// but uses `open_with_transcript` for the final g' opening.
 pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     pp: &MulcsProverParam<E>,
     polynomials: &[Arc<DenseMultilinearExtension<E::ScalarField>>],
@@ -320,8 +350,6 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     evals: &[E::ScalarField],
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<BatchProof<E, MulcsPCS<E>>, PCSError> {
-    let open_timer = start_timer!(|| format!("mulcs sumcheck multi open {} points", points.len()));
-    // Sanity checks
     if polynomials.is_empty() {
         return Err(PCSError::InvalidParameters(
             "empty polynomial list".to_string(),
@@ -329,19 +357,17 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     }
     if polynomials.len() != points.len() || polynomials.len() != evals.len() {
         return Err(PCSError::InvalidParameters(format!(
-            "batch opening length mismatch: polynomials={}, points={}, evals={}",
+            "length mismatch: p={}, pt={}, e={}",
             polynomials.len(),
             points.len(),
             evals.len()
         )));
     }
-    for eval_point in points.iter() {
-        transcript.append_serializable_element(b"eval_point", eval_point)?;
-    }
-    for eval in evals.iter() {
-        transcript.append_field_element(b"eval", eval)?;
-    }
     let num_var = polynomials[0].num_vars;
+    let n = 1 << num_var;
+    let k = polynomials.len();
+    let _t_total = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_total", k, "total");
+
     for poly in polynomials {
         if poly.num_vars != num_var {
             return Err(PCSError::InvalidParameters(format!(
@@ -353,34 +379,62 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     for point in points {
         if point.len() != num_var {
             return Err(PCSError::InvalidParameters(format!(
-                "point length {} != num_vars {}",
+                "point len {} != nv {}",
                 point.len(),
                 num_var
             )));
         }
     }
 
-    let k = polynomials.len();
-    let ell = log2(k) as usize;
+    let _t_abs = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_multi_open_transcript_absorb",
+        k,
+        "eval_points+evals",
+    );
+    for eval_point in points.iter() {
+        transcript.append_serializable_element(b"eval_point", eval_point)?;
+    }
+    for eval in evals.iter() {
+        transcript.append_field_element(b"eval", eval)?;
+    }
+    drop(_t_abs);
 
+    let ell = log2(k) as usize;
+    let _t_eq = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_build_eq_t", k, "eq(t;i)");
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let eq_t_i_list = if ell == 0 {
         vec![E::ScalarField::one()]
     } else {
         build_eq_x_r_vec(t.as_ref())?
     };
+    drop(_t_eq);
 
-    let point_indices = points
-        .iter()
-        .fold(BTreeMap::<_, _>::new(), |mut indices, point| {
-            let idx = indices.len();
-            indices.entry(point).or_insert(idx);
-            indices
-        });
-    let deduped_points =
-        BTreeMap::from_iter(point_indices.iter().map(|(point, idx)| (*idx, *point)))
-            .into_values()
-            .collect::<Vec<_>>();
+    let _t_groups = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_multi_open_group_points",
+        k,
+        "dedup-points",
+    );
+    let point_indices = points.iter().fold(BTreeMap::<_, _>::new(), |mut m, pt| {
+        let i = m.len();
+        m.entry(pt).or_insert(i);
+        m
+    });
+    let deduped_points = BTreeMap::from_iter(point_indices.iter().map(|(pt, idx)| (*idx, *pt)))
+        .into_values()
+        .collect::<Vec<_>>();
+    drop(_t_groups);
+
+    let _t_merge = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_multi_open_merge_polys",
+        deduped_points.len(),
+        "merge-by-point",
+    );
     let merged_tilde_gs = polynomials
         .iter()
         .zip(points.iter())
@@ -390,55 +444,65 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
                 .map(Arc::new)
                 .take(point_indices.len())
                 .collect::<Vec<_>>(),
-            |mut merged_tilde_gs, ((poly, point), coeff)| {
-                *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
-                    (*coeff, poly.deref());
-                merged_tilde_gs
+            |mut merged, ((poly, point), coeff)| {
+                *Arc::make_mut(&mut merged[point_indices[point]]) += (*coeff, poly.deref());
+                merged
             },
         );
+    drop(_t_merge);
 
+    let _t_tilde = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_multi_open_build_tilde_eqs",
+        deduped_points.len(),
+        "eq(b;zi)",
+    );
     let tilde_eqs: Vec<_> = deduped_points
         .iter()
         .map(|point| {
-            let eq_b_zi = build_eq_x_r_vec(point).unwrap();
-            Arc::new(DenseMultilinearExtension::from_evaluations_vec(
-                num_var, eq_b_zi,
-            ))
+            let e = build_eq_x_r_vec(point).unwrap();
+            Arc::new(DenseMultilinearExtension::from_evaluations_vec(num_var, e))
         })
         .collect();
+    drop(_t_tilde);
 
+    let _t_sc = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_multi_open_sumcheck_prove",
+        num_var,
+        "sumcheck",
+    );
     let mut sum_check_vp = VirtualPolynomial::new(num_var);
-    for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
-        sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
+    for (g, eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
+        sum_check_vp.add_mle_list([g.clone(), eq], E::ScalarField::one())?;
     }
-
     let proof = match <PolyIOP<E::ScalarField> as SumCheck<E::ScalarField>>::prove(
         &sum_check_vp,
         transcript,
     ) {
         Ok(p) => p,
-        Err(_) => {
-            return Err(PCSError::InvalidProver(
-                "Sumcheck in batch proving Failed".to_string(),
-            ));
-        },
+        Err(_) => return Err(PCSError::InvalidProver("Sumcheck failed".to_string())),
     };
+    drop(_t_sc);
 
     let a2 = &proof.point[..num_var];
 
+    let _t_g = profile::ScopedTimer::new(num_var, n, "mulcs_multi_open_build_g_prime", 1, "g'=sum");
     let mut g_prime = Arc::new(DenseMultilinearExtension::zero());
-    for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-        let eq_i_a2 = eq_eval(a2, point)?;
-        *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
+    for (g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
+        let eq = eq_eval(a2, point)?;
+        *Arc::make_mut(&mut g_prime) += (eq, g.deref());
     }
+    drop(_t_g);
 
-    // Use transcript-aware Mulcs open
     let mut open_t = IOPTranscript::new(b"mulcs-gprime-open");
     open_t.append_serializable_element(b"point_a2", &a2.to_vec())?;
     open_t.append_field_element(b"mu", &E::ScalarField::from(num_var as u64))?;
     let (g_prime_proof, _g_prime_eval) = open_with_transcript(pp, &g_prime, a2, &mut open_t)?;
 
-    end_timer!(open_timer);
+    drop(_t_total);
     Ok(BatchProof {
         sum_check_proof: proof,
         f_i_eval_at_point_i: evals.to_vec(),
@@ -446,8 +510,10 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     })
 }
 
-/// Mulcs-specific sumcheck batch verify. Same logic as generic sumcheck batcher
-/// but uses `verify_with_transcript` for the final g' opening.
+// ═══════════════════════════════════════════════════════════════════
+// Sumcheck batch verify (profiled)
+// ═══════════════════════════════════════════════════════════════════
+
 pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     vp: &MulcsVerifierParam<E>,
     f_i_commitments: &[Commitment<E>],
@@ -455,59 +521,77 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     proof: &BatchProof<E, MulcsPCS<E>>,
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<bool, PCSError> {
-    let _t_total = profile::ScopedTimer::new(0, 0, "batch_verify_total", 0, "sumcheck");
-    let open_timer = start_timer!(|| "mulcs sumcheck batch verify");
-
     if f_i_commitments.is_empty() {
         return Err(PCSError::InvalidProof("empty commitments".to_string()));
     }
     if f_i_commitments.len() != points.len()
         || f_i_commitments.len() != proof.f_i_eval_at_point_i.len()
     {
-        return Err(PCSError::InvalidProof(
-            "batch verify length mismatch".to_string(),
-        ));
+        return Err(PCSError::InvalidProof("length mismatch".to_string()));
     }
+    let k = f_i_commitments.len();
+    let num_var = proof.sum_check_proof.point.len();
+    let n = 1 << num_var;
+    let _t_total =
+        profile::ScopedTimer::new(num_var, n, "mulcs_batch_verify_total", k, "sumcheck-batch");
 
+    let _t_abs = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_batch_verify_transcript_absorb",
+        k,
+        "pts+evals",
+    );
     for eval_point in points.iter() {
         transcript.append_serializable_element(b"eval_point", eval_point)?;
     }
     for eval in proof.f_i_eval_at_point_i.iter() {
         transcript.append_field_element(b"eval", eval)?;
     }
-
-    let k = f_i_commitments.len();
-    let ell = log2(k) as usize;
-    let num_var = proof.sum_check_proof.point.len();
+    drop(_t_abs);
 
     for point in points {
         if point.len() != num_var {
             return Err(PCSError::InvalidProof(format!(
-                "point length {} != num_var {}",
+                "point len {} != nv {}",
                 point.len(),
                 num_var
             )));
         }
     }
 
+    let ell = log2(k) as usize;
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let a2 = &proof.sum_check_proof.point[..num_var];
-
     let eq_t_list = if ell == 0 {
         vec![E::ScalarField::one()]
     } else {
         build_eq_x_r_vec(t.as_ref())?
     };
 
+    let _t_gc = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_batch_verify_build_g_prime_commit",
+        k,
+        "MSM-g'-commit",
+    );
     let mut scalars = vec![];
     let mut bases = vec![];
     for (i, point) in points.iter().enumerate() {
-        let eq_i_a2 = eq_eval(a2, point)?;
-        scalars.push(eq_i_a2 * eq_t_list[i]);
+        scalars.push(eq_eval(a2, point)? * eq_t_list[i]);
         bases.push(f_i_commitments[i].0);
     }
     let g_prime_commit = E::G1::msm_unchecked(&bases, &scalars);
+    drop(_t_gc);
 
+    let _t_sc = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_batch_verify_sumcheck_verify",
+        num_var,
+        "sumcheck-verify",
+    );
     let mut sum = E::ScalarField::zero();
     for (i, &e) in eq_t_list.iter().enumerate().take(k) {
         sum += e * proof.f_i_eval_at_point_i[i];
@@ -526,13 +610,19 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
         Ok(p) => p,
         Err(_) => {
             return Err(PCSError::InvalidProver(
-                "Sumcheck in batch verification failed".to_string(),
-            ));
+                "Sumcheck verify failed".to_string(),
+            ))
         },
     };
-    let tilde_g_eval = subclaim.expected_evaluation;
+    drop(_t_sc);
 
-    // Use transcript-aware Mulcs verify
+    let _t_open = profile::ScopedTimer::new(
+        num_var,
+        n,
+        "mulcs_batch_verify_final_open",
+        1,
+        "final-mulcs-open",
+    );
     let mut verify_t = IOPTranscript::new(b"mulcs-gprime-open");
     verify_t.append_serializable_element(b"point_a2", &a2.to_vec())?;
     verify_t.append_field_element(b"mu", &E::ScalarField::from(num_var as u64))?;
@@ -540,55 +630,22 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
         vp,
         &Commitment(g_prime_commit.into_affine()),
         a2,
-        &tilde_g_eval,
+        &subclaim.expected_evaluation,
         &proof.g_prime_proof,
         &mut verify_t,
     )?;
-
-    end_timer!(open_timer);
+    drop(_t_open);
+    drop(_t_total);
     Ok(res)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// KZG multi-point opening / Claymore identity / polynomial utils
+// Polynomial utilities (unchanged)
 // ═══════════════════════════════════════════════════════════════════
 
-fn mulcs_batch_kzg_open<E: Pairing>(
-    pp: &MulcsProverParam<E>,
-    f_v: &UnivarPoly<E::ScalarField>,
-    h_bar: &UnivarPoly<E::ScalarField>,
-    z: E::ScalarField,
-    gamma: E::ScalarField,
-    y_f: E::ScalarField,
-    y_f_prime: E::ScalarField,
-    y_h: E::ScalarField,
-    y_h_prime: E::ScalarField,
-) -> (E::G1Affine, Vec<E::ScalarField>, Vec<E::ScalarField>) {
-    let gz = gamma * z;
-    let f_pts = [(z, y_f), (gz, y_f_prime)];
-    let h_pts = [(z, y_h), (gz, y_h_prime)];
-    let (rf, z_coeffs) = build_multi_point_polys(&f_pts);
-    let (rh, _) = build_multi_point_polys(&h_pts);
-    let qf = poly_sub_div(&f_v.coeffs, &rf, &z_coeffs);
-    let qh = poly_sub_div(&h_bar.coeffs, &rh, &z_coeffs);
-    let max_deg = qf.len().max(qh.len());
-    let mut q_comb = vec![E::ScalarField::zero(); max_deg];
-    for i in 0..qf.len() {
-        q_comb[i] += qf[i];
-    }
-    for i in 0..qh.len() {
-        q_comb[i] += qh[i];
-    }
-    let pi = pp.commit(&q_comb);
-    (pi, rf, rh)
-}
-
-/// Evaluate eq polynomial.
 fn eq_eval<F: Field>(x: &[F], y: &[F]) -> Result<F, PCSError> {
     if x.len() != y.len() {
-        return Err(PCSError::InvalidParameters(
-            "x and y have different length".to_string(),
-        ));
+        return Err(PCSError::InvalidParameters("len mismatch".to_string()));
     }
     let mut res = F::one();
     for (&xi, &yi) in x.iter().zip(y.iter()) {
@@ -624,15 +681,15 @@ fn check_claymore_identity<F: Field>(
 
 fn build_multi_point_polys<F: Field>(points: &[(F, F)]) -> (Vec<F>, Vec<F>) {
     let k = points.len();
-    let mut z_coeffs = vec![F::ZERO; k + 1];
-    z_coeffs[0] = F::one();
+    let mut zc = vec![F::ZERO; k + 1];
+    zc[0] = F::one();
     for &(zi, _) in points {
         for d in (1..=k).rev() {
-            z_coeffs[d] = z_coeffs[d - 1] - zi * z_coeffs[d];
+            zc[d] = zc[d - 1] - zi * zc[d];
         }
-        z_coeffs[0] *= -zi;
+        zc[0] *= -zi;
     }
-    let mut r_coeffs = vec![F::ZERO; k];
+    let mut rc = vec![F::ZERO; k];
     for (i, &(zi, yi)) in points.iter().enumerate() {
         let mut num = vec![F::ZERO; k];
         num[0] = F::one();
@@ -649,10 +706,10 @@ fn build_multi_point_polys<F: Field>(points: &[(F, F)]) -> (Vec<F>, Vec<F>) {
         }
         let scale = yi * denom.inverse().unwrap();
         for d in 0..k {
-            r_coeffs[d] += num[d] * scale;
+            rc[d] += num[d] * scale;
         }
     }
-    (r_coeffs, z_coeffs)
+    (rc, zc)
 }
 
 fn poly_div<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
@@ -701,18 +758,18 @@ mod tests {
 
     fn setup(nv: usize) -> (MulcsProverParam<E>, MulcsVerifierParam<E>) {
         let mut rng = test_rng();
-        let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap();
-        MulcsPCS::<E>::trim(&srs, None, Some(nv)).unwrap()
+        MulcsPCS::<E>::trim(
+            &MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap(),
+            None,
+            Some(nv),
+        )
+        .unwrap()
     }
 
-    fn random_point(nv: usize, rng: &mut impl ark_std::rand::Rng) -> Vec<Fr> {
+    fn rpt(nv: usize, rng: &mut impl ark_std::rand::Rng) -> Vec<Fr> {
         (0..nv).map(|_| Fr::rand(rng)).collect()
     }
-
-    fn random_poly(
-        nv: usize,
-        rng: &mut impl ark_std::rand::Rng,
-    ) -> Arc<DenseMultilinearExtension<Fr>> {
+    fn rpoly(nv: usize, rng: &mut impl ark_std::rand::Rng) -> Arc<DenseMultilinearExtension<Fr>> {
         Arc::new(DenseMultilinearExtension::rand(nv, rng))
     }
 
@@ -721,14 +778,11 @@ mod tests {
         let mut rng = test_rng();
         for nv in [2usize, 4, 6] {
             let (ck, vk) = setup(nv);
-            let poly = random_poly(nv, &mut rng);
-            let point = random_point(nv, &mut rng);
+            let poly = rpoly(nv, &mut rng);
+            let point = rpt(nv, &mut rng);
             let com = MulcsPCS::<E>::commit(&ck, &poly)?;
             let (proof, value) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
-            assert!(
-                MulcsPCS::<E>::verify(&vk, &com, &point, &value, &proof)?,
-                "verify nv={nv}"
-            );
+            assert!(MulcsPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
             let fake_val = Fr::rand(&mut rng);
             if fake_val != value {
                 assert!(!MulcsPCS::<E>::verify(
@@ -742,10 +796,9 @@ mod tests {
     #[test]
     fn test_mulcs_single_open_rejects_tampered_z() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let poly = random_poly(nv, &mut rng);
-        let point = random_point(nv, &mut rng);
+        let (ck, vk) = setup(4);
+        let poly = rpoly(4, &mut rng);
+        let point = rpt(4, &mut rng);
         let com = MulcsPCS::<E>::commit(&ck, &poly)?;
         let (mut proof, value) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
         proof.z += Fr::ONE;
@@ -756,15 +809,17 @@ mod tests {
     #[test]
     fn test_mulcs_single_open_rejects_wrong_value_with_fs_z() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let poly = random_poly(nv, &mut rng);
-        let point = random_point(nv, &mut rng);
+        let (ck, vk) = setup(4);
+        let poly = rpoly(4, &mut rng);
+        let point = rpt(4, &mut rng);
         let com = MulcsPCS::<E>::commit(&ck, &poly)?;
-        let (proof, _value) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
-        let fake_val = Fr::rand(&mut rng);
+        let (proof, _) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
         assert!(!MulcsPCS::<E>::verify(
-            &vk, &com, &point, &fake_val, &proof
+            &vk,
+            &com,
+            &point,
+            &Fr::rand(&mut rng),
+            &proof
         )?);
         Ok(())
     }
@@ -772,10 +827,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_verify() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..3).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -799,10 +853,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_verify_k1() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..1).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..1).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -826,10 +879,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_rejects_wrong_eval() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..3).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -839,16 +891,16 @@ mod tests {
             .iter()
             .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
             .collect();
-        let mut wrong_evals = evals.clone();
-        wrong_evals[0] += Fr::ONE;
+        let mut we = evals.clone();
+        we[0] += Fr::ONE;
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
-        let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &wrong_evals, &mut tp)?;
+        let p = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &we, &mut tp)?;
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
         assert_rejects(
-            "wrong_eval_sumcheck",
-            MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv),
+            "we",
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &p, &mut tv),
         );
         Ok(())
     }
@@ -856,10 +908,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_rejects_wrong_point() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..3).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -871,14 +922,14 @@ mod tests {
             .collect();
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
-        let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        let mut wrong_points = points.clone();
-        wrong_points[0] = random_point(nv, &mut rng);
+        let p = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+        let mut wp = points.clone();
+        wp[0] = rpt(4, &mut rng);
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
         assert_rejects(
-            "wrong_point_sumcheck",
-            MulcsPCS::<E>::batch_verify(&vk, &comms, &wrong_points, &proof, &mut tv),
+            "wp",
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &wp, &p, &mut tv),
         );
         Ok(())
     }
@@ -886,10 +937,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_rejects_wrong_commitment() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..3).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -901,18 +951,14 @@ mod tests {
             .collect();
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
-        let proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        let extra = MulcsPCS::<E>::commit(&ck, &random_poly(nv, &mut rng))?;
-        let mut wrong_comms = comms.clone();
-        wrong_comms[0] = extra;
+        let p = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+        let extra = MulcsPCS::<E>::commit(&ck, &rpoly(4, &mut rng))?;
+        let mut wc = comms.clone();
+        wc[0] = extra;
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
         assert!(!MulcsPCS::<E>::batch_verify(
-            &vk,
-            &wrong_comms,
-            &points,
-            &proof,
-            &mut tv
+            &vk, &wc, &points, &p, &mut tv
         )?);
         Ok(())
     }
@@ -920,10 +966,9 @@ mod tests {
     #[test]
     fn test_mulcs_sumcheck_batch_rejects_malformed_lengths() -> Result<(), PCSError> {
         let mut rng = test_rng();
-        let nv = 4;
-        let (ck, vk) = setup(nv);
-        let polys: Vec<_> = (0..3).map(|_| random_poly(nv, &mut rng)).collect();
-        let points: Vec<_> = polys.iter().map(|_| random_point(nv, &mut rng)).collect();
+        let (ck, vk) = setup(4);
+        let polys: Vec<_> = (0..3).map(|_| rpoly(4, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(4, &mut rng)).collect();
         let evals: Vec<Fr> = polys
             .iter()
             .zip(points.iter())
@@ -936,10 +981,9 @@ mod tests {
         let mut tp = IOPTranscript::new(b"test");
         tp.append_field_element(b"init", &Fr::ZERO)?;
         let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-        let short = &comms[..2];
         let mut tv = IOPTranscript::new(b"test");
         tv.append_field_element(b"init", &Fr::ZERO)?;
-        let r = MulcsPCS::<E>::batch_verify(&vk, short, &points, &proof, &mut tv);
+        let r = MulcsPCS::<E>::batch_verify(&vk, &comms[..2], &points, &proof, &mut tv);
         assert!(r.is_err() || !r.unwrap());
         proof.f_i_eval_at_point_i.pop();
         let mut tv2 = IOPTranscript::new(b"test");
@@ -951,75 +995,80 @@ mod tests {
 
     #[test]
     fn test_mulcs_multi_open_rejects_empty_input() {
-        let (ck, _vk) = setup(4);
-        let empty: &[Arc<DenseMultilinearExtension<Fr>>] = &[];
-        let points: &[Vec<Fr>] = &[];
-        let evals: &[Fr] = &[];
+        let (ck, _) = setup(4);
         let mut tp = IOPTranscript::new(b"test");
-        let r = MulcsPCS::<E>::multi_open(&ck, empty, points, evals, &mut tp);
-        assert!(r.is_err());
+        assert!(MulcsPCS::<E>::multi_open(
+            &ck,
+            &[] as &[Arc<_>],
+            &[] as &[Vec<_>],
+            &[] as &[Fr],
+            &mut tp
+        )
+        .is_err());
     }
 
     #[test]
     fn test_mulcs_multi_open_rejects_mismatched_lengths() {
-        let (ck, _vk) = setup(4);
+        let (ck, _) = setup(4);
         let mut rng = test_rng();
-        let poly = random_poly(4, &mut rng);
-        let point = random_point(4, &mut rng);
+        let poly = rpoly(4, &mut rng);
+        let point = rpt(4, &mut rng);
         let mut tp = IOPTranscript::new(b"test");
-        let r = MulcsPCS::<E>::multi_open(
+        assert!(MulcsPCS::<E>::multi_open(
             &ck,
             &[poly.clone()],
             &[point.clone(), point.clone()],
             &[Fr::one()],
-            &mut tp,
-        );
-        assert!(r.is_err());
+            &mut tp
+        )
+        .is_err());
         let mut tp = IOPTranscript::new(b"test");
-        let r = MulcsPCS::<E>::multi_open(
+        assert!(MulcsPCS::<E>::multi_open(
             &ck,
             &[poly.clone()],
             &[point.clone()],
             &[Fr::one(), Fr::one()],
-            &mut tp,
-        );
-        assert!(r.is_err());
+            &mut tp
+        )
+        .is_err());
     }
 
     #[test]
     fn test_mulcs_multi_open_rejects_inconsistent_num_vars() {
-        let (ck, _vk) = setup(4);
+        let (ck, _) = setup(4);
         let mut rng = test_rng();
-        let poly4 = random_poly(4, &mut rng);
-        let poly3 = random_poly(3, &mut rng);
-        let point = random_point(4, &mut rng);
+        let point = rpt(4, &mut rng);
         let mut tp = IOPTranscript::new(b"test");
-        let r = MulcsPCS::<E>::multi_open(
+        assert!(MulcsPCS::<E>::multi_open(
             &ck,
-            &[poly4, poly3],
+            &[rpoly(4, &mut rng), rpoly(3, &mut rng)],
             &[point.clone(), point.clone()],
             &[Fr::one(), Fr::one()],
-            &mut tp,
-        );
-        assert!(r.is_err());
+            &mut tp
+        )
+        .is_err());
     }
 
     #[test]
     fn test_mulcs_multi_open_rejects_wrong_point_len() {
-        let (ck, _vk) = setup(4);
+        let (ck, _) = setup(4);
         let mut rng = test_rng();
-        let poly = random_poly(4, &mut rng);
-        let short_point = random_point(3, &mut rng);
         let mut tp = IOPTranscript::new(b"test");
-        let r = MulcsPCS::<E>::multi_open(&ck, &[poly], &[short_point], &[Fr::one()], &mut tp);
-        assert!(r.is_err());
+        assert!(MulcsPCS::<E>::multi_open(
+            &ck,
+            &[rpoly(4, &mut rng)],
+            &[rpt(3, &mut rng)],
+            &[Fr::one()],
+            &mut tp
+        )
+        .is_err());
     }
 
-    fn assert_rejects(_backend: &str, result: Result<bool, PCSError>) {
-        match result {
-            Ok(true) => panic!("expected reject but got true"),
+    fn assert_rejects(_: &str, r: Result<bool, PCSError>) {
+        match r {
+            Ok(true) => panic!("expected reject"),
             Ok(false) => {},
-            Err(_e) => {},
+            Err(_) => {},
         }
     }
 }

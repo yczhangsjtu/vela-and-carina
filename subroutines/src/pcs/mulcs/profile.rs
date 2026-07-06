@@ -10,7 +10,6 @@ use std::{
     time::Instant,
 };
 
-/// Cached env flag — read once.
 static PROFILE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
 
@@ -30,9 +29,6 @@ fn emit_csv(backend: &str, nv: usize, n: usize, phase: &str, ms: f64, count: usi
     println!("mulcs_internal,{backend},{nv},{n},0,{phase},{ms:.6},{count},{notes}");
 }
 
-/// Emit the unified 9-column CSV header once. Call at profile startup
-/// if no top-level runner provides it. (Currently the mulcs_profile runner
-/// prints its own header, so this is retained for standalone use.)
 #[allow(dead_code)]
 pub(crate) fn emit_header_once() {
     static DONE: AtomicBool = AtomicBool::new(false);
@@ -41,7 +37,7 @@ pub(crate) fn emit_header_once() {
     }
 }
 
-/// A scoped timer. When profiling is disabled, does nothing (no Instant).
+/// A scoped timer. When profiling is disabled, does nothing.
 pub(crate) struct ScopedTimer {
     backend: &'static str,
     nv: usize,
@@ -99,4 +95,51 @@ pub(crate) fn emit_manual(nv: usize, n: usize, phase: &str, ms: f64, count: usiz
     if profiling_enabled() {
         emit_csv("Mulcs", nv, n, phase, ms, count, notes);
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Zero-overhead manual timer (available for fine-grained profiling)
+// ═══════════════════════════════════════════════════════════════════
+
+#[allow(dead_code)]
+pub(crate) struct MaybeTimer {
+    active: bool,
+    acc_ns: u128,
+}
+
+#[allow(dead_code)]
+impl MaybeTimer {
+    pub(crate) fn new() -> Self {
+        MaybeTimer {
+            active: profiling_enabled(),
+            acc_ns: 0,
+        }
+    }
+
+    pub(crate) fn start(&self) -> MaybeTick {
+        MaybeTick {
+            t0: if self.active {
+                Some(Instant::now())
+            } else {
+                None
+            },
+        }
+    }
+
+    pub(crate) fn add(&mut self, tick: &MaybeTick) {
+        if self.active {
+            if let Some(t0) = tick.t0 {
+                self.acc_ns += t0.elapsed().as_nanos();
+            }
+        }
+    }
+
+    pub(crate) fn ns(&self) -> u128 {
+        self.acc_ns
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) struct MaybeTick {
+    t0: Option<Instant>,
 }
