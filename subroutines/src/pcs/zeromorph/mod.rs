@@ -19,8 +19,8 @@ use ark_ff::{batch_inversion, Field};
 use ark_poly::MultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
-    borrow::Borrow, log2, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec::Vec,
-    One, Zero,
+    borrow::Borrow, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec::Vec, One,
+    Zero,
 };
 use std::{collections::BTreeMap, iter, ops::Deref};
 use transcript::IOPTranscript;
@@ -150,33 +150,17 @@ fn compute_quotients<F: Field>(poly_evals: &[F], point: &[F]) -> (Vec<Vec<F>>, F
 // squares / offsets / scalars — exactly matching plonkish
 // ═══════════════════════════════════════════════════════════════════
 
-/// squares(x): [x, x³, x⁶, x¹¹, x¹⁸, ...] (matches plonkish
-/// arithmetic::squares)
-fn squares_seq<F: Field>(base: F) -> Vec<F> {
-    let mut result = Vec::new();
-    let mut square = base;
-    let mut power = F::one();
-    loop {
-        let val = square * power;
-        result.push(val);
-        power *= base;
-        square = square.square();
-    }
-}
-
 /// eval_and_quotient_scalars — exactly matching plonkish
 fn eval_and_quotient_scalars<F: Field>(y: F, x: F, z: F, u: &[F]) -> (F, Vec<F>) {
     let num_vars = u.len();
 
-    // squares_of_x: [x, x³, x⁶, ...] for NV+1 elements
+    // plonkish arithmetic::squares(x): [x, x^2, x^4, ...]
     let squares_of_x = {
         let mut v = Vec::with_capacity(num_vars + 1);
-        let mut sq = x;
-        let mut pw = F::one();
+        let mut cur = x;
         for _ in 0..=num_vars {
-            v.push(sq * pw);
-            pw *= x;
-            sq = sq.square();
+            v.push(cur);
+            cur = cur.square();
         }
         v
     };
@@ -218,18 +202,16 @@ fn eval_and_quotient_scalars<F: Field>(y: F, x: F, z: F, u: &[F]) -> (F, Vec<F>)
 }
 
 /// Form q_hat(X) = Σ_{idx=0}^{NV-1} y^idx · X^{N - 2^idx} · q_idx(X)
-/// where q_idx has length 2^{NV-1-idx}.
+/// where q_idx has length 2^idx.
 fn form_q_hat<F: Field>(quotients: &[Vec<F>], y: F, n: usize) -> Vec<F> {
     let mut q_hat = vec![F::zero(); n];
     let mut y_pow = F::one();
     for (idx, q) in quotients.iter().enumerate() {
-        // offset = N - 2^idx, q has length 2^{NV-1-idx}
-        // q starts at position N - 2^idx, with at most q.len() elements
+        // offset = N - 2^idx, q has length 2^idx after compute_quotients reverses
+        // the highest-variable-first quotient list.
         let offset = n - (1 << idx);
-        let q_len = q.len();
-        let end = (offset + q_len).min(n);
-        let count = end - offset;
-        for j in 0..count {
+        debug_assert_eq!(q.len(), 1 << idx);
+        for j in 0..q.len() {
             q_hat[offset + j] += y_pow * q[j];
         }
         y_pow *= y;
@@ -367,11 +349,11 @@ fn verify_with_transcript<E: Pairing>(
     }
     let c = E::G1::msm_unchecked(&bases, &scalars).into_affine();
 
-    // Pairing check: e(C, -s_offset_g2) * e(π, s_g2 - x*g2) == 1
-    let neg_offset = (-vp.s_offset_g2.into_group()).into_affine();
+    // Pairing check: e(C, -s_offset_g2) * e(π, s_g2 - x*g2) == 1,
+    // equivalently e(C, s_offset_g2) == e(π, s_g2 - x*g2).
     let sx = (vp.s_g2.into_group() - vp.g2.into_group() * x).into_affine();
 
-    Ok(E::pairing(c, neg_offset) == E::pairing(proof.kzg_proof, sx))
+    Ok(E::pairing(c, vp.s_offset_g2) == E::pairing(proof.kzg_proof, sx))
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -417,7 +399,7 @@ fn zm_sumcheck<E: Pairing>(
     }
 
     let k = polynomials.len();
-    let ell = log2(k) as usize;
+    let ell = k.next_power_of_two().ilog2() as usize;
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let eq_t_list = if ell == 0 {
         vec![E::ScalarField::one()]
@@ -522,7 +504,7 @@ fn zm_batch_verify<E: Pairing>(
         transcript.append_field_element(b"eval", e)?;
     }
 
-    let ell = log2(k) as usize;
+    let ell = k.next_power_of_two().ilog2() as usize;
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let a2 = &proof.sum_check_proof.point[..num_var];
     let eq_t_list = if ell == 0 {
@@ -559,11 +541,7 @@ fn zm_batch_verify<E: Pairing>(
         transcript,
     ) {
         Ok(p) => p,
-        Err(_) => {
-            return Err(PCSError::InvalidProver(
-                "Sumcheck verify failed".to_string(),
-            ))
-        },
+        Err(_) => return Ok(false),
     };
 
     // Verify g' opening with transcript-aware verify (resumes same transcript)
