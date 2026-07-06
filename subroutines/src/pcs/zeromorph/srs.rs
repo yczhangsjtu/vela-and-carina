@@ -2,12 +2,19 @@
 //!
 //! Zeromorph uses two univariate KZG SRS slices from a single universal SRS:
 //! - commit_pp: for committing polynomials and q_i/q_hat
-//! - open_pp: for the final KZG opening proof (shifted by offset = N)
+//! - open_pp: for the final KZG opening proof (shifted by offset)
 //!
 //! The verifier uses s_offset_g2 = powers_of_s_g2[offset] for the pairing
-//! check. Reference: han0110/plonkish (MIT-licensed).
+//! check.
+//!
+//! offset = monomial_g1.len() - poly_size. When gen_srs_for_testing produces
+//! 2N powers and trim is called with poly_size=N, offset = N.
+//! When gen_srs_for_testing produces >2N powers and trim uses smaller
+//! poly_size, offset adjusts accordingly.
+//!
+//! Reference: han0110/plonkish (MIT-licensed).
 
-use crate::pcs::{prelude::PCSError, StructuredReferenceString};
+use crate::pcs::{mulcs::profile::ScopedTimer, prelude::PCSError, StructuredReferenceString};
 use ark_ec::{
     pairing::Pairing,
     scalar_mul::{fixed_base::FixedBase, variable_base::VariableBaseMSM},
@@ -19,29 +26,21 @@ use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct ZeromorphUniversalParams<E: Pairing> {
-    /// Full G1 monomial powers: [1]₁, [x]₁, ..., [x^{max_degree}]₁
     pub monomial_g1: Vec<E::G1Affine>,
-    /// Full G2 monomial powers: [1]₂, [x]₂, ..., [x^{max_degree}]₂
     pub powers_of_s_g2: Vec<E::G2Affine>,
 }
 
-/// Prover parameters for a specific polynomial size N.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct ZeromorphProverParam<E: Pairing> {
-    /// G1 powers [0..N] for committing (polynomial + quotients + q_hat)
     pub commit_powers: Vec<E::G1Affine>,
-    /// G1 powers [offset..offset+N] for final KZG opening proof
     pub open_powers: Vec<E::G1Affine>,
 }
 
-/// Verifier parameters.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct ZeromorphVerifierParam<E: Pairing> {
     pub g: E::G1Affine,
     pub g2: E::G2Affine,
-    /// [x]₂ for KZG opening verification
     pub s_g2: E::G2Affine,
-    /// [x^{offset}]₂ for the offset pairing check
     pub s_offset_g2: E::G2Affine,
 }
 
@@ -70,8 +69,6 @@ impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
     }
 
     fn trim(&self, poly_size: usize) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
-        // poly_size = N = 2^num_vars
-        // offset = total_g1_len - poly_size
         if poly_size > self.monomial_g1.len() {
             return Err(PCSError::InvalidParameters(format!(
                 "poly_size {} > SRS max {}",
@@ -109,10 +106,8 @@ impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
                 "num_vars must be > 0".to_string(),
             ));
         }
-        // Need 2N powers: N for commit, N for open (with offset=N)
         let poly_size = 1 << supported_num_vars;
         let total_len = 2 * poly_size;
-        let _offset = poly_size;
 
         let x = E::ScalarField::rand(rng);
         let g = E::G1::rand(rng);
@@ -126,23 +121,35 @@ impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
             acc *= x;
         }
 
-        // G1 powers via FixedBase MSM
         let scalar_bits = E::ScalarField::MODULUS_BIT_SIZE as usize;
+
+        // G1 powers via FixedBase MSM
+        let _t_g1 = ScopedTimer::new(
+            supported_num_vars,
+            poly_size,
+            "zeromorph_srs_g1_powers",
+            total_len,
+            "G1-fixed-base-msm",
+        );
         let window_size = FixedBase::get_mul_window_size(total_len);
         let g_table = FixedBase::get_window_table(scalar_bits, window_size, g);
-        let g_projective = FixedBase::msm(scalar_bits, window_size, &g_table, &x_pows);
-        let monomial_g1 = E::G1::normalize_batch(&g_projective);
+        let g_proj = FixedBase::msm(scalar_bits, window_size, &g_table, &x_pows);
+        let monomial_g1 = E::G1::normalize_batch(&g_proj);
+        drop(_t_g1);
 
-        // G2 powers: [1]₂, [x]₂, [x²]₂, ..., [x^{total_len-1}]₂
-        let mut powers_of_s_g2 = Vec::with_capacity(total_len);
-        powers_of_s_g2.push(h.into_affine()); // [x⁰]₂
-        let mut hs = h * x;
-        for _ in 1..total_len {
-            powers_of_s_g2.push(hs.into_affine());
-            hs *= x;
-        }
-        // powers_of_s_g2[i] = [xⁱ]₂. s_g2 = powers_of_s_g2[1] = [x]₂.
-        // s_offset_g2 = powers_of_s_g2[offset] = [x^{offset}]₂.
+        // G2 powers via FixedBase MSM (reuses same x_pows as G1)
+        let _t_g2 = ScopedTimer::new(
+            supported_num_vars,
+            poly_size,
+            "zeromorph_srs_g2_powers",
+            total_len,
+            "G2-fixed-base-msm",
+        );
+        let h_window = FixedBase::get_mul_window_size(total_len);
+        let h_table = FixedBase::get_window_table(scalar_bits, h_window, h);
+        let h_proj = FixedBase::msm(scalar_bits, h_window, &h_table, &x_pows);
+        let powers_of_s_g2 = E::G2::normalize_batch(&h_proj);
+        drop(_t_g2);
 
         Ok(ZeromorphUniversalParams {
             monomial_g1,
@@ -167,6 +174,10 @@ mod tests {
             assert_eq!(ck.commit_powers[0], vk.g);
             assert_eq!(ck.commit_powers.len(), n);
             assert_eq!(ck.open_powers.len(), n);
+            assert_eq!(vk.s_g2, srs.powers_of_s_g2[1]);
+            let offset = srs.monomial_g1.len() - n;
+            assert_eq!(vk.s_offset_g2, srs.powers_of_s_g2[offset]);
+            assert_eq!(ck.open_powers[0], srs.monomial_g1[offset]);
         }
         Ok(())
     }

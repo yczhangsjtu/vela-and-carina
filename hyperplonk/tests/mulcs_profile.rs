@@ -1,11 +1,11 @@
-//! HyperPlonk Mulcs PCS profiling test
+//! HyperPlonk PCS profiling test — supports mKZG, Mulcs, Zeromorph.
 //!
 //! **#[ignore] — does not run in default cargo test.**
 //!
 //! Run with:
-//!   MULCS_PROFILE=1 NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk
-//! --release --test mulcs_profile -- --ignored --nocapture   MULCS_PROFILE=1
-//! NV_RANGE=8,10,12,14 BACKEND=both cargo test -p hyperplonk --release --test
+//!   NV_RANGE=4,6 BACKEND=all REPEAT=3 cargo test -p hyperplonk --release
+//! --test mulcs_profile -- --ignored --nocapture   MULCS_PROFILE=1
+//! NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk --release --test
 //! mulcs_profile -- --ignored --nocapture
 //!
 //! Output: unified 9-column CSV to stdout.
@@ -21,7 +21,7 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MultilinearKzgPCS},
+            prelude::{MulcsPCS, MultilinearKzgPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -30,7 +30,7 @@ mod tests {
     type E = Bls12_381;
     type FrType = Fr;
 
-    const VALID_BACKENDS: &[&str] = &["mulcs", "mkzg", "both"];
+    const VALID_BACKENDS: &[&str] = &["mulcs", "mkzg", "zeromorph", "both", "all"];
 
     fn default_nv_range() -> Vec<usize> {
         let val = env::var("NV_RANGE").unwrap_or_else(|_| "8,10,12".to_string());
@@ -187,6 +187,69 @@ mod tests {
         Ok(())
     }
 
+    fn bench_zeromorph(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
+        let mut rng = test_rng();
+        let n = 1 << nv;
+        let gate = CustomizedGates::vanilla_plonk_gate();
+        let circuit = MockCircuit::<FrType>::new(n, &gate);
+        assert!(circuit.is_satisfied());
+
+        for r in 0..repeat {
+            let t0 = Instant::now();
+            let srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Zeromorph", nv, n, r, "srs_gen", srs_ms, 1, "");
+
+            let t0 = Instant::now();
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::preprocess(
+                &circuit.index,
+                &srs,
+            )?;
+            let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row(
+                "top_level",
+                "Zeromorph",
+                nv,
+                n,
+                r,
+                "preprocess",
+                prep_ms,
+                1,
+                "",
+            );
+
+            let t0 = Instant::now();
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::prove(
+                &pk,
+                &circuit.public_inputs,
+                &circuit.witnesses,
+            )?;
+            let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Zeromorph", nv, n, r, "prove", prove_ms, 1, "");
+
+            let t0 = Instant::now();
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::verify(
+                &vk,
+                &circuit.public_inputs,
+                &proof,
+            )?;
+            let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row(
+                "top_level",
+                "Zeromorph",
+                nv,
+                n,
+                r,
+                "verify",
+                verify_ms,
+                1,
+                if ok { "pass" } else { "FAIL" },
+            );
+            assert!(ok, "Zeromorph verify failed at nv={nv} r={r}");
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "profile: run with MULCS_PROFILE=1 NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk --release --test mulcs_profile -- --ignored --nocapture"]
     fn bench_mulcs_profile() -> Result<(), HyperPlonkErrors> {
@@ -206,13 +269,17 @@ mod tests {
 
         for &nv in &nvs {
             let n = 1 << nv;
-            if backend == "mulcs" || backend == "both" {
+            if backend == "mulcs" || backend == "both" || backend == "all" {
                 println!("# --- Mulcs nv={nv} N={n} ---");
                 bench_mulcs(nv, repeat)?;
             }
-            if backend == "mkzg" || backend == "both" {
+            if backend == "mkzg" || backend == "both" || backend == "all" {
                 println!("# --- mKZG nv={nv} N={n} ---");
                 bench_mkzg(nv, repeat)?;
+            }
+            if backend == "zeromorph" || backend == "both" || backend == "all" {
+                println!("# --- Zeromorph nv={nv} N={n} ---");
+                bench_zeromorph(nv, repeat)?;
             }
         }
         Ok(())

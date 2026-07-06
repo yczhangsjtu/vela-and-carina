@@ -25,7 +25,7 @@ use ark_std::{
 use std::{collections::BTreeMap, iter, ops::Deref};
 use transcript::IOPTranscript;
 
-use crate::pcs::multilinear_kzg::batching::BatchProof;
+use crate::pcs::{mulcs::profile, multilinear_kzg::batching::BatchProof};
 use srs::{ZeromorphProverParam, ZeromorphUniversalParams, ZeromorphVerifierParam};
 
 pub(crate) mod srs;
@@ -250,13 +250,28 @@ fn open_with_transcript<E: Pairing>(
     transcript.append_field_element(b"eval", &eval)?;
 
     // 1. Compute quotients
+    let _t_quotients = profile::ScopedTimer::new(
+        num_vars,
+        n,
+        "zeromorph_open_compute_quotients",
+        num_vars,
+        "quotients",
+    );
     let (quotients, _remainder) = compute_quotients::<E::ScalarField>(&coeffs, point);
+    drop(_t_quotients);
 
-    // 2. Commit each quotient (using commit powers)
+    let _t_qcomms = profile::ScopedTimer::new(
+        num_vars,
+        n,
+        "zeromorph_open_commit_qs",
+        num_vars,
+        "KZG-commit-qs",
+    );
     let q_comms: Vec<E::G1Affine> = quotients.iter().map(|q| pp.commit_commit(q)).collect();
     for qc in &q_comms {
         transcript.append_serializable_element(b"q_comm", qc)?;
     }
+    drop(_t_qcomms);
 
     // 3. Challenge y
     let y = transcript.get_and_append_challenge_vectors(b"y", 1)?[0];
@@ -274,6 +289,7 @@ fn open_with_transcript<E: Pairing>(
     let (eval_scalar, q_scalars) = eval_and_quotient_scalars(y, x, z, point);
 
     // 7. Build f(X) such that f(x) = 0
+    let _t_f = profile::ScopedTimer::new(num_vars, n, "zeromorph_open_build_f", 1, "build-f");
     let mut f = vec![E::ScalarField::zero(); n];
     for i in 0..coeffs.len() {
         f[i] += z * coeffs[i];
@@ -287,9 +303,11 @@ fn open_with_transcript<E: Pairing>(
             f[j] += scalar * v;
         }
     }
+    drop(_t_f);
 
     // 8. KZG open f at x using open_pp (shifted SRS)
-    // q_open(X) = f(X) / (X - x)
+    let _t_kzg_q =
+        profile::ScopedTimer::new(num_vars, n, "zeromorph_open_kzg_quotient", 1, "kzg-q");
     let mut q_open = vec![E::ScalarField::zero(); n - 1];
     let mut carry = E::ScalarField::zero();
     for i in (1..n).rev() {
@@ -298,6 +316,7 @@ fn open_with_transcript<E: Pairing>(
         carry = term * x;
     }
     let kzg_proof = pp.commit_open(&q_open);
+    drop(_t_kzg_q);
 
     let proof = ZeromorphProof {
         q_comms,
@@ -341,6 +360,13 @@ fn verify_with_transcript<E: Pairing>(
     let (eval_scalar, q_scalars) = eval_and_quotient_scalars(y, x, z, point);
 
     // Form aggregated commitment c
+    let _t_msm = profile::ScopedTimer::new(
+        num_vars,
+        1 << num_vars,
+        "zeromorph_verify_msm",
+        num_vars + 3,
+        "G1-MSM",
+    );
     let mut scalars = vec![E::ScalarField::one(), z, eval_scalar * eval];
     let mut bases = vec![proof.q_hat_comm, commitment.0, vp.g];
     for (qc, &qs) in proof.q_comms.iter().zip(q_scalars.iter()) {
@@ -348,12 +374,20 @@ fn verify_with_transcript<E: Pairing>(
         bases.push(*qc);
     }
     let c = E::G1::msm_unchecked(&bases, &scalars).into_affine();
+    drop(_t_msm);
 
-    // Pairing check: e(C, -s_offset_g2) * e(π, s_g2 - x*g2) == 1,
-    // equivalently e(C, s_offset_g2) == e(π, s_g2 - x*g2).
+    // Pairing check: e(C, s_offset_g2) == e(π, s_g2 - x*g2)
+    let _t_pair = profile::ScopedTimer::new(
+        num_vars,
+        1 << num_vars,
+        "zeromorph_verify_pairing",
+        1,
+        "pairing",
+    );
     let sx = (vp.s_g2.into_group() - vp.g2.into_group() * x).into_affine();
-
-    Ok(E::pairing(c, vp.s_offset_g2) == E::pairing(proof.kzg_proof, sx))
+    let ok = E::pairing(c, vp.s_offset_g2) == E::pairing(proof.kzg_proof, sx);
+    drop(_t_pair);
+    Ok(ok)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -798,6 +832,34 @@ mod tests {
             &mut IOPTranscript::new(b"t"),
         );
         assert!(r.is_err() || !r.unwrap());
+        Ok(())
+    }
+
+    #[test]
+    fn test_zm_reject_tampered_q_hat_comm() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let pt = rpt(nv, &mut rng);
+        let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+        let (mut proof, val) = ZeromorphPCS::<E>::open(&ck, &p, &pt)?;
+        proof.q_hat_comm = (proof.q_hat_comm.into_group() * Fr::from(2u64)).into_affine();
+        assert!(!ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_zm_reject_tampered_kzg_proof() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let pt = rpt(nv, &mut rng);
+        let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+        let (mut proof, val) = ZeromorphPCS::<E>::open(&ck, &p, &pt)?;
+        proof.kzg_proof = (proof.kzg_proof.into_group() * Fr::from(3u64)).into_affine();
+        assert!(!ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
         Ok(())
     }
 }

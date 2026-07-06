@@ -27,7 +27,7 @@ use transcript::IOPTranscript;
 
 use self::util::UnivarPoly;
 
-mod profile;
+pub(crate) mod profile;
 pub(crate) mod srs;
 mod util;
 

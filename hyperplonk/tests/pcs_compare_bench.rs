@@ -1,13 +1,14 @@
-//! HyperPlonk PCS comparison benchmark: mKZG vs Mulcs
+//! HyperPlonk PCS comparison benchmark: mKZG vs Mulcs vs Zeromorph
 //!
 //! **These tests are `#[ignore]` and do not run in default `cargo test`.**
 //!
 //! Run with:
-//!   cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare --
-//! --ignored --nocapture
+//!   NV_RANGE=4,6 cargo test -p hyperplonk --release
+//! bench_hyperplonk_pcs_compare -- --ignored --nocapture   NV_RANGE=8,10,12
+//! cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare -- --ignored
+//! --nocapture
 //!
-//! Parameters: vanilla Plonk gate, BLS12-381, nv = 4,5,6 by default (small for
-//! quick iteration). Set the NV_RANGE env var to override: e.g. NV_RANGE=6,8,10
+//! Parameters: vanilla Plonk gate, BLS12-381. Set NV_RANGE env var to override.
 
 #[cfg(test)]
 mod tests {
@@ -20,11 +21,14 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MultilinearKzgPCS},
+            prelude::{MulcsPCS, MultilinearKzgPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
     };
+
+    type E = Bls12_381;
+    type FrType = Fr;
 
     fn default_nv_range() -> Vec<usize> {
         if let Ok(val) = env::var("NV_RANGE") {
@@ -36,119 +40,142 @@ mod tests {
         }
     }
 
-    fn bench_backend<B: AsRef<str>>(backend: B, nv: usize) -> Result<(), HyperPlonkErrors> {
+    fn bench_backend(backend: &str, nv: usize) -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let size = 1 << nv;
         let gate = CustomizedGates::vanilla_plonk_gate();
-        let circuit = MockCircuit::<Fr>::new(size, &gate);
+        let circuit = MockCircuit::<FrType>::new(size, &gate);
         assert!(circuit.is_satisfied());
-        let name = backend.as_ref();
 
-        if name == "mKZG" {
-            let t0 = Instant::now();
-            let srs = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
-            let srs_time = t0.elapsed();
+        match backend {
+            "mKZG" => {
+                let t0 = Instant::now();
+                let srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let (pk, vk) = <PolyIOP<Fr> as HyperPlonkSNARK<
-                Bls12_381,
-                MultilinearKzgPCS<Bls12_381>,
-            >>::preprocess(&circuit.index, &srs)?;
-            let prep_time = t0.elapsed();
+                let t0 = Instant::now();
+                let (pk, vk) =
+                    <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::preprocess(
+                        &circuit.index,
+                        &srs,
+                    )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let proof = <PolyIOP<Fr> as HyperPlonkSNARK<
-                Bls12_381,
-                MultilinearKzgPCS<Bls12_381>,
-            >>::prove(&pk, &circuit.public_inputs, &circuit.witnesses)?;
-            let prove_time = t0.elapsed();
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let ok =
-                <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::verify(
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::verify(
                     &vk,
                     &circuit.public_inputs,
                     &proof,
                 )?;
-            let verify_time = t0.elapsed();
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            println!(
-                "{:>6} │ {:>3} │ {:>6} │ {:>8.2?} │ {:>10.2?} │ {:>10.2?} │ {:>10.2?} │ {:>5} │ unavailable",
-                name, nv, size, srs_time, prep_time, prove_time, verify_time, ok
-            );
-        } else if name == "Mulcs" {
-            let t0 = Instant::now();
-            let srs = MulcsPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
-            let srs_time = t0.elapsed();
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!(
+                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
+                    if ok { "pass" } else { "FAIL" }
+                );
+                assert!(ok);
+            },
+            "Mulcs" => {
+                let t0 = Instant::now();
+                let srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let (pk, vk) =
-                <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MulcsPCS<Bls12_381>>>::preprocess(
+                let t0 = Instant::now();
+                let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::preprocess(
                     &circuit.index,
                     &srs,
                 )?;
-            let prep_time = t0.elapsed();
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MulcsPCS<Bls12_381>>>::prove(
-                &pk,
-                &circuit.public_inputs,
-                &circuit.witnesses,
-            )?;
-            let prove_time = t0.elapsed();
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            let t0 = Instant::now();
-            let ok = <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MulcsPCS<Bls12_381>>>::verify(
-                &vk,
-                &circuit.public_inputs,
-                &proof,
-            )?;
-            let verify_time = t0.elapsed();
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-            println!(
-                "{:>6} │ {:>3} │ {:>6} │ {:>8.2?} │ {:>10.2?} │ {:>10.2?} │ {:>10.2?} │ {:>5} │ unavailable",
-                name, nv, size, srs_time, prep_time, prove_time, verify_time, ok
-            );
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!(
+                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
+                    if ok { "pass" } else { "FAIL" }
+                );
+                assert!(ok);
+            },
+            "Zeromorph" => {
+                let t0 = Instant::now();
+                let srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) =
+                    <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::preprocess(
+                        &circuit.index,
+                        &srs,
+                    )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!(
+                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
+                    if ok { "pass" } else { "FAIL" }
+                );
+                assert!(ok);
+            },
+            _ => panic!("unknown backend: {backend}"),
         }
-
         Ok(())
     }
 
     #[test]
-    #[ignore = "benchmark: run with cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare -- --ignored --nocapture"]
+    #[ignore = "benchmark: run with NV_RANGE=4,6 cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare -- --ignored --nocapture"]
     fn bench_hyperplonk_pcs_compare() -> Result<(), HyperPlonkErrors> {
         let nvs = default_nv_range();
-        let threads = rayon::current_num_threads();
-        println!(
-            "\n╔════════════════════════════════════════════════════════════════════════════════════╗"
-        );
-        println!(
-            "║  HyperPlonk PCS Comparison — BLS12-381, vanilla Plonk, {} thread(s)               ║",
-            threads
-        );
-        println!(
-            "╠════════╤═════╤════════╤══════════╤════════════╤════════════╤════════════╤═══════╤═══════════╣"
-        );
-        println!(
-            "║ Backend│ nv  │ N      │ SRS gen  │ Preprocess │ Prove      │ Verify     │ Pass  │ Proof size║"
-        );
-        println!(
-            "╠════════╪═════╪════════╪══════════╪════════════╪════════════╪════════════╪═══════╪═══════════╣"
-        );
-
+        println!("source,backend,nv,N,repeat,phase,elapsed_ms,count,notes");
         for &nv in &nvs {
             bench_backend("mKZG", nv)?;
             bench_backend("Mulcs", nv)?;
-            if nv != *nvs.last().unwrap() {
-                println!(
-                    "╟────────┼─────┼────────┼──────────┼────────────┼────────────┼────────────┼───────┼───────────╢"
-                );
-            }
+            bench_backend("Zeromorph", nv)?;
         }
-
-        println!(
-            "╚════════╧═════╧════════╧══════════╧════════════╧════════════╧════════════╧═══════╧═══════════╝"
-        );
         Ok(())
     }
 }
