@@ -19,8 +19,8 @@ use ark_ff::Field;
 use ark_poly::MultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
-    borrow::Borrow, format, log2, marker::PhantomData, rand::Rng,
-    string::ToString, sync::Arc, vec, vec::Vec, One, Zero,
+    borrow::Borrow, format, log2, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec,
+    vec::Vec, One, Zero,
 };
 use std::{collections::BTreeMap, iter, ops::Deref};
 use transcript::IOPTranscript;

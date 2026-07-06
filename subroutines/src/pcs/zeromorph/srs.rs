@@ -1,0 +1,173 @@
+//! Structured Reference String for Zeromorph PCS.
+//!
+//! Zeromorph uses two univariate KZG SRS slices from a single universal SRS:
+//! - commit_pp: for committing polynomials and q_i/q_hat
+//! - open_pp: for the final KZG opening proof (shifted by offset = N)
+//!
+//! The verifier uses s_offset_g2 = powers_of_s_g2[offset] for the pairing
+//! check. Reference: han0110/plonkish (MIT-licensed).
+
+use crate::pcs::{prelude::PCSError, StructuredReferenceString};
+use ark_ec::{
+    pairing::Pairing,
+    scalar_mul::{fixed_base::FixedBase, variable_base::VariableBaseMSM},
+    CurveGroup,
+};
+use ark_ff::PrimeField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
+
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
+pub struct ZeromorphUniversalParams<E: Pairing> {
+    /// Full G1 monomial powers: [1]₁, [x]₁, ..., [x^{max_degree}]₁
+    pub monomial_g1: Vec<E::G1Affine>,
+    /// Full G2 monomial powers: [1]₂, [x]₂, ..., [x^{max_degree}]₂
+    pub powers_of_s_g2: Vec<E::G2Affine>,
+}
+
+/// Prover parameters for a specific polynomial size N.
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
+pub struct ZeromorphProverParam<E: Pairing> {
+    /// G1 powers [0..N] for committing (polynomial + quotients + q_hat)
+    pub commit_powers: Vec<E::G1Affine>,
+    /// G1 powers [offset..offset+N] for final KZG opening proof
+    pub open_powers: Vec<E::G1Affine>,
+}
+
+/// Verifier parameters.
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
+pub struct ZeromorphVerifierParam<E: Pairing> {
+    pub g: E::G1Affine,
+    pub g2: E::G2Affine,
+    /// [x]₂ for KZG opening verification
+    pub s_g2: E::G2Affine,
+    /// [x^{offset}]₂ for the offset pairing check
+    pub s_offset_g2: E::G2Affine,
+}
+
+impl<E: Pairing> ZeromorphProverParam<E> {
+    pub fn commit_with(&self, powers: &[E::G1Affine], coeffs: &[E::ScalarField]) -> E::G1Affine {
+        assert!(coeffs.len() <= powers.len());
+        E::G1::msm_unchecked(&powers[..coeffs.len()], coeffs).into_affine()
+    }
+    pub fn commit_commit(&self, coeffs: &[E::ScalarField]) -> E::G1Affine {
+        self.commit_with(&self.commit_powers, coeffs)
+    }
+    pub fn commit_open(&self, coeffs: &[E::ScalarField]) -> E::G1Affine {
+        self.commit_with(&self.open_powers, coeffs)
+    }
+}
+
+impl<E: Pairing> StructuredReferenceString<E> for ZeromorphUniversalParams<E> {
+    type ProverParam = ZeromorphProverParam<E>;
+    type VerifierParam = ZeromorphVerifierParam<E>;
+
+    fn extract_prover_param(&self, _size: usize) -> Self::ProverParam {
+        unimplemented!()
+    }
+    fn extract_verifier_param(&self, _size: usize) -> Self::VerifierParam {
+        unimplemented!()
+    }
+
+    fn trim(&self, poly_size: usize) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+        // poly_size = N = 2^num_vars
+        // offset = total_g1_len - poly_size
+        if poly_size > self.monomial_g1.len() {
+            return Err(PCSError::InvalidParameters(format!(
+                "poly_size {} > SRS max {}",
+                poly_size,
+                self.monomial_g1.len()
+            )));
+        }
+        let offset = self.monomial_g1.len() - poly_size;
+
+        let commit_powers = self.monomial_g1[..poly_size].to_vec();
+        let open_powers = self.monomial_g1[offset..offset + poly_size].to_vec();
+        let s_offset_g2 = self.powers_of_s_g2[offset];
+
+        let g_first = commit_powers[0];
+        Ok((
+            ZeromorphProverParam {
+                commit_powers,
+                open_powers,
+            },
+            ZeromorphVerifierParam {
+                g: g_first,
+                g2: self.powers_of_s_g2[0],
+                s_g2: self.powers_of_s_g2[1],
+                s_offset_g2,
+            },
+        ))
+    }
+
+    fn gen_srs_for_testing<R: Rng>(
+        rng: &mut R,
+        supported_num_vars: usize,
+    ) -> Result<Self, PCSError> {
+        if supported_num_vars == 0 {
+            return Err(PCSError::InvalidParameters(
+                "num_vars must be > 0".to_string(),
+            ));
+        }
+        // Need 2N powers: N for commit, N for open (with offset=N)
+        let poly_size = 1 << supported_num_vars;
+        let total_len = 2 * poly_size;
+        let _offset = poly_size;
+
+        let x = E::ScalarField::rand(rng);
+        let g = E::G1::rand(rng);
+        let h = E::G2::rand(rng);
+
+        // Field powers
+        let mut x_pows = Vec::with_capacity(total_len);
+        let mut acc = E::ScalarField::one();
+        for _ in 0..total_len {
+            x_pows.push(acc);
+            acc *= x;
+        }
+
+        // G1 powers via FixedBase MSM
+        let scalar_bits = E::ScalarField::MODULUS_BIT_SIZE as usize;
+        let window_size = FixedBase::get_mul_window_size(total_len);
+        let g_table = FixedBase::get_window_table(scalar_bits, window_size, g);
+        let g_projective = FixedBase::msm(scalar_bits, window_size, &g_table, &x_pows);
+        let monomial_g1 = E::G1::normalize_batch(&g_projective);
+
+        // G2 powers: [1]₂, [x]₂, [x²]₂, ..., [x^{total_len-1}]₂
+        let mut powers_of_s_g2 = Vec::with_capacity(total_len);
+        powers_of_s_g2.push(h.into_affine()); // [x⁰]₂
+        let mut hs = h * x;
+        for _ in 1..total_len {
+            powers_of_s_g2.push(hs.into_affine());
+            hs *= x;
+        }
+        // powers_of_s_g2[i] = [xⁱ]₂. s_g2 = powers_of_s_g2[1] = [x]₂.
+        // s_offset_g2 = powers_of_s_g2[offset] = [x^{offset}]₂.
+
+        Ok(ZeromorphUniversalParams {
+            monomial_g1,
+            powers_of_s_g2,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bls12_381::Bls12_381;
+    use ark_std::test_rng;
+
+    #[test]
+    fn test_zeromorph_srs_gen() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in 4..8 {
+            let srs = ZeromorphUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
+            let n = 1 << nv;
+            let (ck, vk) = srs.trim(n)?;
+            assert_eq!(ck.commit_powers[0], vk.g);
+            assert_eq!(ck.commit_powers.len(), n);
+            assert_eq!(ck.open_powers.len(), n);
+        }
+        Ok(())
+    }
+}

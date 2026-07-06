@@ -21,5 +21,9 @@ pub use crate::pcs::{
         srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam},
         UnivariateKzgBatchProof, UnivariateKzgPCS, UnivariateKzgProof,
     },
+    zeromorph::{
+        srs::{ZeromorphProverParam, ZeromorphUniversalParams, ZeromorphVerifierParam},
+        ZeromorphPCS, ZeromorphProof,
+    },
     HasEvals, PolynomialCommitmentScheme, StructuredReferenceString,
 };

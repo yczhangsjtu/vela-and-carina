@@ -9,6 +9,7 @@ mod mulcs;
 mod multilinear_kzg;
 mod structs;
 mod univariate_kzg;
+mod zeromorph;
 
 pub mod prelude;
 
