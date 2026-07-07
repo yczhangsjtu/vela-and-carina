@@ -25,10 +25,23 @@ util = { path = "../util" }
 # path = "benches/iop_bench.rs"
 # harness = false
 
+[dev-dependencies]
+criterion = "0.5.1"
+
 # Benchmarks
 [[bench]]
 name = "pcs-benches"
 path = "benches/pcs_bench.rs"
+harness = false
+
+[[bench]]
+name = "group-ops-benches"
+path = "benches/group_ops_bench.rs"
+harness = false
+
+[[bench]]
+name = "pcs-single-verify-benches"
+path = "benches/pcs_single_verify_bench.rs"
 harness = false
 
 [features]
