@@ -13,13 +13,15 @@ use crate::{
 };
 use arithmetic::{build_eq_x_r_vec, DenseMultilinearExtension, VPAuxInfo, VirtualPolynomial};
 use ark_ec::{
-    pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
+    pairing::{Pairing, PairingOutput},
+    scalar_mul::variable_base::VariableBaseMSM,
+    AffineRepr, CurveGroup,
 };
 use ark_ff::Field;
 use ark_poly::MultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
-    borrow::Borrow, format, log2, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec,
+    borrow::Borrow, format, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec,
     vec::Vec, One, Zero,
 };
 use std::{collections::BTreeMap, iter, ops::Deref};
@@ -326,21 +328,20 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
 
     let _t_pair = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_pairing", 1, "1-pairing");
     let gz = gamma * z;
-    let f_pts = [(z, proof.y_f), (gz, proof.y_f_prime)];
-    let h_pts = [(z, proof.y_hbar), (gz, proof.y_hbar_prime)];
-    let (rf, _) = build_multi_point_polys(&f_pts);
-    let (rh, _) = build_multi_point_polys(&h_pts);
-    let mut r = vec![E::ScalarField::zero(); 2];
-    for j in 0..2 {
-        r[j] = rf[j] + rh[j];
-    }
-    let cm_r = vp.g1_one.into_group() * r[0] + vp.g1_x.into_group() * r[1];
+    let rf = two_point_remainder(z, proof.y_f, gz, proof.y_f_prime)?;
+    let rh = two_point_remainder(z, proof.y_hbar, gz, proof.y_hbar_prime)?;
+    let r0 = rf[0] + rh[0];
+    let r1 = rf[1] + rh[1];
+    let cm_r = vp.g1_one.into_group() * r0 + vp.g1_x.into_group() * r1;
     let cm_comb = commitment.0.into_group() + proof.cm_hbar.into_group() - cm_r;
     let s = z + gz;
     let p = z * gz;
     let zx_g2 = vp.g2_x2.into_group() - vp.g2_x.into_group() * s + vp.g2_one.into_group() * p;
-    let ok =
-        E::pairing(cm_comb.into_affine(), vp.g2_one) == E::pairing(proof.pi, zx_g2.into_affine());
+    let neg_pi = (-proof.pi.into_group()).into_affine();
+    let ok = E::multi_pairing(
+        [cm_comb.into_affine(), neg_pi],
+        [vp.g2_one, zx_g2.into_affine()],
+    ) == PairingOutput(E::TargetField::one());
     drop(_t_pair);
     if !ok {
         return Ok(false);
@@ -426,7 +427,7 @@ pub(crate) fn mulcs_sumcheck_multi_open<E: Pairing>(
     }
     drop(_t_abs);
 
-    let ell = log2(k) as usize;
+    let ell = k.next_power_of_two().ilog2() as usize;
     let _t_eq = profile::ScopedTimer::new(
         "Mulcs",
         num_var,
@@ -610,7 +611,7 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
         }
     }
 
-    let ell = log2(k) as usize;
+    let ell = k.next_power_of_two().ilog2() as usize;
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
     let a2 = &proof.sum_check_proof.point[..num_var];
     let eq_t_list = if ell == 0 {
@@ -730,6 +731,16 @@ fn check_claymore_identity<F: Field>(
     let gamma_n1 = gamma.pow([(n - 1) as u64]);
     let z_n1 = z.pow([(n - 1) as u64]);
     Ok(gamma_n1 * y_hbar - y_hbar_prime == z_n1 * (y_f * y_r - claimed_value))
+}
+
+fn two_point_remainder<F: Field>(x0: F, y0: F, x1: F, y1: F) -> Result<[F; 2], PCSError> {
+    let denom = x1 - x0;
+    let inv = denom
+        .inverse()
+        .ok_or_else(|| PCSError::InvalidProof("duplicate KZG opening points".to_string()))?;
+    let slope = (y1 - y0) * inv;
+    let intercept = y0 - slope * x0;
+    Ok([intercept, slope])
 }
 
 fn build_multi_point_polys<F: Field>(points: &[(F, F)]) -> (Vec<F>, Vec<F>) {

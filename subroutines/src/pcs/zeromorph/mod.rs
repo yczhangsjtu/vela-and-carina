@@ -13,7 +13,9 @@ use crate::{
 };
 use arithmetic::{build_eq_x_r_vec, DenseMultilinearExtension, VPAuxInfo, VirtualPolynomial};
 use ark_ec::{
-    pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
+    pairing::{Pairing, PairingOutput},
+    scalar_mul::variable_base::VariableBaseMSM,
+    AffineRepr, CurveGroup,
 };
 use ark_ff::{batch_inversion, Field};
 use ark_poly::MultilinearExtension;
@@ -429,7 +431,9 @@ fn verify_with_transcript<E: Pairing>(
         "pairing",
     );
     let sx = (vp.s_g2.into_group() - vp.g2.into_group() * x).into_affine();
-    let ok = E::pairing(c, vp.s_offset_g2) == E::pairing(proof.kzg_proof, sx);
+    let neg_pi = (-proof.kzg_proof.into_group()).into_affine();
+    let ok =
+        E::multi_pairing([c, neg_pi], [vp.s_offset_g2, sx]) == PairingOutput(E::TargetField::one());
     drop(_t_pair);
     Ok(ok)
 }
