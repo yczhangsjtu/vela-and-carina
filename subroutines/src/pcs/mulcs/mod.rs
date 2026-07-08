@@ -31,9 +31,11 @@ use self::util::UnivarPoly;
 
 use crate::pcs::profile;
 pub(crate) mod srs;
+pub mod symmetric;
 mod util;
 
 use srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam};
+pub use symmetric::{MulcsSymmetricPCS, MulcsSymmetricProof};
 
 pub struct MulcsPCS<E: Pairing> {
     phantom: PhantomData<E>,

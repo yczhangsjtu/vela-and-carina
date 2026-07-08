@@ -1,91 +1,160 @@
 // Copyright (c) 2023 Espresso Systems (espressosys.com)
 // This file is part of the HyperPlonk library.
 
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::UniformRand;
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension};
 use ark_std::{sync::Arc, test_rng};
 use std::time::Instant;
 use subroutines::pcs::{
-    prelude::{MultilinearKzgPCS, PCSError, PolynomialCommitmentScheme},
-    StructuredReferenceString,
+    prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, ZeromorphPCS},
+    PolynomialCommitmentScheme,
 };
 
-fn main() -> Result<(), PCSError> {
-    bench_pcs()
+const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
+
+fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
+    match std::env::var("PCS_BENCH_NV_RANGE") {
+        Ok(raw) => {
+            let mut list = Vec::new();
+            for s in raw.split(',') {
+                let s = s.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                let nv: usize = s.parse().map_err(|_| {
+                    PCSError::InvalidParameters(format!("PCS_BENCH_NV_RANGE: invalid nv '{}'", s))
+                })?;
+                list.push(nv);
+            }
+            if list.is_empty() {
+                Err(PCSError::InvalidParameters(
+                    "PCS_BENCH_NV_RANGE: empty list".to_string(),
+                ))
+            } else {
+                Ok(list)
+            }
+        },
+        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_NV_LIST.to_vec()),
+        Err(e) => Err(PCSError::InvalidParameters(format!(
+            "PCS_BENCH_NV_RANGE env error: {}",
+            e
+        ))),
+    }
 }
 
-fn bench_pcs() -> Result<(), PCSError> {
+fn main() -> Result<(), PCSError> {
+    bench_all()
+}
+
+fn bench_all() -> Result<(), PCSError> {
     let mut rng = test_rng();
+    let nv_list = parse_nv_list()?;
+    println!(
+        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
+        "backend", "nv", "srs_gen", "trim", "commit", "prover(open)", "verify"
+    );
+    println!("{}", "-".repeat(92));
 
-    // normal polynomials
-    let uni_params = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, 24)?;
+    for &nv in &nv_list {
+        let rep = if nv <= 12 { 5 } else { 2 };
 
-    for nv in 4..25 {
-        let repetition = if nv < 10 {
-            10
-        } else if nv < 20 {
-            5
-        } else {
-            2
-        };
-
-        let poly = Arc::new(DenseMultilinearExtension::rand(nv, &mut rng));
-        let (ck, vk) = uni_params.trim(nv)?;
-
-        let point: Vec<_> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
-
-        // commit
-        let com = {
-            let start = Instant::now();
-            for _ in 0..repetition {
-                let _commit = MultilinearKzgPCS::commit(&ck, &poly)?;
-            }
-
-            println!(
-                "KZG commit for {} variables: {} ns",
-                nv,
-                start.elapsed().as_nanos() / repetition as u128
-            );
-
-            MultilinearKzgPCS::commit(&ck, &poly)?
-        };
-
-        // open
-        let (proof, value) = {
-            let start = Instant::now();
-            for _ in 0..repetition {
-                let _open = MultilinearKzgPCS::open(&ck, &poly, &point)?;
-            }
-
-            println!(
-                "KZG open for {} variables: {} ns",
-                nv,
-                start.elapsed().as_nanos() / repetition as u128
-            );
-            MultilinearKzgPCS::open(&ck, &poly, &point)?
-        };
-
-        // verify
-        {
-            let start = Instant::now();
-            for _ in 0..repetition {
-                assert!(MultilinearKzgPCS::verify(
-                    &vk, &com, &point, &value, &proof
-                )?);
-            }
-            println!(
-                "KZG verify for {} variables: {} ns",
-                nv,
-                start.elapsed().as_nanos() / repetition as u128
-            );
-        }
-
-        println!("====================================");
+        bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv, rep)?;
+        bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv, rep)?;
+        bench_backend::<MulcsSymmetricPCS<Bls12_381>>(&mut rng, "MulcsSymmetric", nv, rep)?;
+        bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv, rep)?;
+        println!();
     }
 
     Ok(())
+}
+
+fn bench_backend<PCS>(
+    rng: &mut impl ark_std::rand::Rng,
+    name: &str,
+    nv: usize,
+    rep: usize,
+) -> Result<(), PCSError>
+where
+    PCS: PolynomialCommitmentScheme<
+        Bls12_381,
+        Polynomial = Arc<DenseMultilinearExtension<Fr>>,
+        Point = Vec<Fr>,
+        Evaluation = Fr,
+    >,
+{
+    let srs_gen_ns = {
+        let start = Instant::now();
+        for _ in 0..rep {
+            let _ = PCS::gen_srs_for_testing(rng, nv)?;
+        }
+        start.elapsed().as_nanos() / (rep as u128)
+    };
+
+    let srs = PCS::gen_srs_for_testing(rng, nv)?;
+
+    let trim_ns = {
+        let start = Instant::now();
+        for _ in 0..rep {
+            let _ = PCS::trim(&srs, None, Some(nv))?;
+        }
+        start.elapsed().as_nanos() / (rep as u128)
+    };
+
+    let (ck, vk) = PCS::trim(&srs, None, Some(nv))?;
+    let poly = Arc::new(DenseMultilinearExtension::rand(nv, rng));
+    let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(rng)).collect();
+    let com = PCS::commit(&ck, &poly)?;
+
+    let commit_ns = {
+        let start = Instant::now();
+        for _ in 0..rep {
+            let _ = PCS::commit(&ck, &poly)?;
+        }
+        start.elapsed().as_nanos() / (rep as u128)
+    };
+
+    let prover_ns = {
+        let start = Instant::now();
+        for _ in 0..rep {
+            let _ = PCS::open(&ck, &poly, &point)?;
+        }
+        start.elapsed().as_nanos() / (rep as u128)
+    };
+
+    let (proof, value) = PCS::open(&ck, &poly, &point)?;
+    assert!(PCS::verify(&vk, &com, &point, &value, &proof)?);
+
+    let verify_ns = {
+        let start = Instant::now();
+        for _ in 0..rep {
+            assert!(PCS::verify(&vk, &com, &point, &value, &proof)?);
+        }
+        start.elapsed().as_nanos() / (rep as u128)
+    };
+
+    println!(
+        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
+        name,
+        nv,
+        format_ns(srs_gen_ns),
+        format_ns(trim_ns),
+        format_ns(commit_ns),
+        format_ns(prover_ns),
+        format_ns(verify_ns),
+    );
+
+    Ok(())
+}
+
+fn format_ns(ns: u128) -> String {
+    if ns >= 1_000_000_000 {
+        format!("{:.2} s", ns as f64 / 1e9)
+    } else if ns >= 1_000_000 {
+        format!("{:.2} ms", ns as f64 / 1e6)
+    } else if ns >= 1_000 {
+        format!("{:.2} us", ns as f64 / 1e3)
+    } else {
+        format!("{ns} ns")
+    }
 }

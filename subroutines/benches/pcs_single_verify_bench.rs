@@ -12,7 +12,7 @@ use criterion::{
 };
 use std::time::Duration;
 use subroutines::pcs::{
-    prelude::{MulcsPCS, MultilinearKzgPCS, PCSError, ZeromorphPCS},
+    prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, ZeromorphPCS},
     PolynomialCommitmentScheme,
 };
 
@@ -124,8 +124,10 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
     for nv in NV_RANGE {
         bench_backend::<MultilinearKzgPCS<E>>(&mut group, &mut rng, "mKZG", nv)
             .expect("mKZG setup/proof generation failed");
-        bench_backend::<MulcsPCS<E>>(&mut group, &mut rng, "Mulcs", nv)
+        bench_backend::<MulcsPCS<E>>(&mut group, &mut rng, "MulcsClaymore", nv)
             .expect("Mulcs setup/proof generation failed");
+        bench_backend::<MulcsSymmetricPCS<E>>(&mut group, &mut rng, "MulcsSymmetric", nv)
+            .expect("MulcsSymmetric setup/proof generation failed");
         bench_backend::<ZeromorphPCS<E>>(&mut group, &mut rng, "Zeromorph", nv)
             .expect("Zeromorph setup/proof generation failed");
     }
