@@ -146,6 +146,24 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MulcsPCS<E> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Verifier safety helper
+// ═══════════════════════════════════════════════════════════════════
+
+fn checked_domain_size_from_mu(mu: usize, label: &str) -> Result<usize, PCSError> {
+    if mu == 0 {
+        return Err(PCSError::InvalidProof(format!("{label}: mu is zero")));
+    }
+    if mu >= usize::BITS as usize {
+        return Err(PCSError::InvalidProof(format!(
+            "{label}: mu {mu} exceeds platform word size"
+        )));
+    }
+    1usize
+        .checked_shl(mu as u32)
+        .ok_or_else(|| PCSError::InvalidProof(format!("{label}: mu {mu} overflow in shift")))
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Transcript-aware single opening (profiled)
 // ═══════════════════════════════════════════════════════════════════
 
@@ -314,7 +332,22 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<bool, PCSError> {
     let mu = proof.mu;
-    let n = 1 << mu;
+    let n = checked_domain_size_from_mu(mu, "verify")?;
+
+    if point.len() != mu {
+        return Err(PCSError::InvalidProof(format!(
+            "verify: point length {} != proof.mu {}",
+            point.len(),
+            mu
+        )));
+    }
+    if vp.max_degree < n - 1 {
+        return Err(PCSError::InvalidProof(format!(
+            "verifier param max_degree {} insufficient for n={}",
+            vp.max_degree, n
+        )));
+    }
+
     let gamma = vp.gamma;
 
     let _t_total = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_total", 1, "total");
@@ -352,7 +385,7 @@ pub(crate) fn verify_with_transcript<E: Pairing>(
     let _t_clay = profile::ScopedTimer::new("Mulcs", mu, n, "mulcs_verify_claymore", 1, "claymore");
     let result = check_claymore_identity(
         gamma,
-        mu,
+        n,
         z,
         proof.y_f,
         proof.y_hbar,
@@ -577,7 +610,7 @@ pub(crate) fn mulcs_sumcheck_batch_verify<E: Pairing>(
     }
     let k = f_i_commitments.len();
     let num_var = proof.sum_check_proof.point.len();
-    let n = 1 << num_var;
+    let n = checked_domain_size_from_mu(num_var, "batch_verify")?;
     let _t_total = profile::ScopedTimer::new(
         "Mulcs",
         num_var,
@@ -712,7 +745,7 @@ fn eq_eval<F: Field>(x: &[F], y: &[F]) -> Result<F, PCSError> {
 
 fn check_claymore_identity<F: Field>(
     gamma: F,
-    mu: usize,
+    n: usize,
     z: F,
     y_f: F,
     y_hbar: F,
@@ -720,7 +753,6 @@ fn check_claymore_identity<F: Field>(
     point: &[F],
     claimed_value: F,
 ) -> Result<bool, PCSError> {
-    let n = 1 << mu;
     let z_inv = z
         .inverse()
         .ok_or_else(|| PCSError::InvalidParameters("z is zero".to_string()))?;
@@ -1128,6 +1160,87 @@ mod tests {
             &mut tp
         )
         .is_err());
+    }
+
+    // ── Huge mu / num_var do not panic ──
+
+    #[test]
+    fn test_mulcs_verify_rejects_huge_mu_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 2;
+        let (ck, vk) = setup(nv);
+        let poly = rpoly(nv, &mut rng);
+        let point = rpt(nv, &mut rng);
+        let com = MulcsPCS::<E>::commit(&ck, &poly)?;
+        let (mut proof, value) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
+        proof.mu = usize::BITS as usize;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MulcsPCS::<E>::verify(&vk, &com, &point, &value, &proof)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "huge mu ({}) should fail without panic",
+                proof.mu
+            ),
+            Err(_) => panic!("caught panic on huge mu — should not panic"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_verify_rejects_wrong_point_len() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let poly = rpoly(nv, &mut rng);
+        let point = rpt(nv, &mut rng);
+        let com = MulcsPCS::<E>::commit(&ck, &poly)?;
+        let (proof, value) = MulcsPCS::<E>::open(&ck, &poly, &point)?;
+        let short_pt = rpt(2, &mut rng);
+        let r = MulcsPCS::<E>::verify(&vk, &com, &short_pt, &value, &proof);
+        assert!(r.is_err(), "short point should return Error, not panic");
+        let long_pt = rpt(8, &mut rng);
+        let r2 = MulcsPCS::<E>::verify(&vk, &com, &long_pt, &value, &proof);
+        assert!(r2.is_err(), "long point should return Error, not panic");
+        Ok(())
+    }
+
+    #[test]
+    fn test_mulcs_batch_verify_rejects_huge_num_var_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 2;
+        let (ck, vk) = setup(nv);
+        let polys: Vec<_> = (0..1).map(|_| rpoly(nv, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| MulcsPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let mut proof = MulcsPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+
+        proof.sum_check_proof.point = vec![Fr::zero(); usize::BITS as usize];
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MulcsPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "huge num_var ({}) should fail without panic",
+                proof.sum_check_proof.point.len()
+            ),
+            Err(_) => panic!("caught panic on huge num_var — should not panic"),
+        }
+        Ok(())
     }
 
     fn assert_rejects(_: &str, r: Result<bool, PCSError>) {
