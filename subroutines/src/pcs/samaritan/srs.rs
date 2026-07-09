@@ -1,8 +1,10 @@
 //! Structured Reference String for Samaritan PCS.
 //!
-//! Samaritan needs KZG powers in both G1 and G2 up to N = 2^num_vars.
-//! Uses FixedBase MSM for G1/G2 powers generation (same approach as
-//! mKZG/Mulcs).
+//! Samaritan needs G1 KZG powers up to N = 2^num_vars for prover commitments
+//! and KZG quotient proofs. The verifier only needs G2 generator h and h*tau
+//! (for the KZG pairing check and the shift pairing check).
+//! Full G2 powers are NOT generated — the current single-open protocol
+//! implementation does not require them.
 
 use crate::pcs::{prelude::PCSError, profile::ScopedTimer, StructuredReferenceString};
 use ark_ec::{
@@ -16,19 +18,38 @@ use ark_std::{format, rand::Rng, vec::Vec, One, UniformRand};
 
 const BACKEND: &str = "Samaritan";
 
-/// Universal parameters for Samaritan PCS. Contains prover G1/G2 powers
-/// up to `max_degree` = 2^num_vars.
+fn checked_supported_degree(supported_num_vars: usize, label: &str) -> Result<usize, PCSError> {
+    if supported_num_vars == 0 {
+        return Err(PCSError::InvalidParameters(
+            "constant polynomial not supported".to_string(),
+        ));
+    }
+    if supported_num_vars >= usize::BITS as usize {
+        return Err(PCSError::InvalidParameters(format!(
+            "{label}: supported_num_vars {supported_num_vars} exceeds platform word size"
+        )));
+    }
+    1usize
+        .checked_shl(supported_num_vars as u32)
+        .ok_or_else(|| {
+            PCSError::InvalidParameters(format!(
+                "{label}: supported_num_vars {supported_num_vars} overflow in shift"
+            ))
+        })
+}
+
+/// Universal parameters for Samaritan PCS. Contains prover G1 powers
+/// up to `max_degree` = 2^num_vars, plus verifier G2 basis.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct SamaritanUniversalParams<E: Pairing> {
     pub prover_param: SamaritanProverParam<E>,
     pub verifier_param: SamaritanVerifierParam<E>,
 }
 
-/// Prover parameters: G1 powers for MSM, G2 powers for quotient.
+/// Prover parameters: G1 powers for MSM.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct SamaritanProverParam<E: Pairing> {
     pub g1_powers: Vec<E::G1Affine>,
-    pub g2_powers: Vec<E::G2Affine>,
     pub max_degree: usize,
     pub max_num_vars: usize,
 }
@@ -39,7 +60,6 @@ pub struct SamaritanVerifierParam<E: Pairing> {
     pub g: E::G1Affine,
     pub h: E::G2Affine,
     pub h_x: E::G2Affine,
-    pub h_x_higher: E::G2Affine,
     pub max_degree: usize,
     pub max_num_vars: usize,
 }
@@ -82,15 +102,13 @@ impl<E: Pairing> StructuredReferenceString<E> for SamaritanUniversalParams<E> {
         let max_num_vars = supported_size.trailing_zeros() as usize;
         let ck = SamaritanProverParam {
             g1_powers: self.prover_param.g1_powers[..=supported_size].to_vec(),
-            g2_powers: self.prover_param.g2_powers[..=supported_size].to_vec(),
             max_degree: supported_size,
             max_num_vars,
         };
         let vk = SamaritanVerifierParam {
             g: self.verifier_param.g,
             h: self.verifier_param.h,
-            h_x: self.prover_param.g2_powers[1],
-            h_x_higher: self.prover_param.g2_powers[supported_size],
+            h_x: self.verifier_param.h_x,
             max_degree: supported_size,
             max_num_vars,
         };
@@ -105,13 +123,7 @@ impl<E: Pairing> StructuredReferenceString<E> for SamaritanUniversalParams<E> {
         rng: &mut R,
         supported_num_vars: usize,
     ) -> Result<Self, PCSError> {
-        if supported_num_vars == 0 {
-            return Err(PCSError::InvalidParameters(
-                "constant polynomial not supported".to_string(),
-            ));
-        }
-
-        let max_degree = 1 << supported_num_vars;
+        let max_degree = checked_supported_degree(supported_num_vars, "srs_gen")?;
         let n = max_degree;
 
         let _t_total = ScopedTimer::new(
@@ -168,32 +180,20 @@ impl<E: Pairing> StructuredReferenceString<E> for SamaritanUniversalParams<E> {
         let g1_powers: Vec<E::G1Affine> = E::G1::normalize_batch(&g1_projective);
         drop(_t2);
 
-        // G2 powers via FixedBase MSM
-        let _t3 = ScopedTimer::new(
-            BACKEND,
-            supported_num_vars,
-            n,
-            "samaritan_srs_g2_powers",
-            max_degree + 1,
-            "G2-fixed-base-msm",
-        );
-        let g2_window_size = FixedBase::get_mul_window_size(max_degree + 1);
-        let g2_table = FixedBase::get_window_table(scalar_bits, g2_window_size, h);
-        let g2_projective = FixedBase::msm(scalar_bits, g2_window_size, &g2_table, &x_pows);
-        let g2_powers: Vec<E::G2Affine> = E::G2::normalize_batch(&g2_projective);
-        drop(_t3);
+        // Only compute h and h*tau — the single-open verifier only needs
+        // these two G2 elements. No full G2 powers are generated.
+        let h_affine = h.into_affine();
+        let h_x = (h * x).into_affine();
 
         let pp = SamaritanProverParam {
             g1_powers,
-            g2_powers,
             max_degree,
             max_num_vars: supported_num_vars,
         };
         let vp = SamaritanVerifierParam {
             g: pp.g1_powers[0],
-            h: pp.g2_powers[0],
-            h_x: pp.g2_powers[1],
-            h_x_higher: pp.g2_powers[max_degree],
+            h: h_affine,
+            h_x,
             max_degree,
             max_num_vars: supported_num_vars,
         };
@@ -222,9 +222,22 @@ mod tests {
             let (ck, vk) = srs.trim(n)?;
             assert_eq!(ck.g1_powers[0], vk.g, "g1_powers[0] != g");
             assert_eq!(ck.g1_powers.len(), n + 1);
-            assert_eq!(ck.g2_powers.len(), n + 1);
-            assert_eq!(vk.h_x_higher, ck.g2_powers[n]);
+            assert_eq!(vk.max_degree, n);
+            assert_eq!(vk.max_num_vars, nv);
         }
         Ok(())
+    }
+
+    #[test]
+    fn test_samaritan_srs_rejects_huge_num_vars_without_panic() {
+        let mut rng = test_rng();
+        let huge = usize::BITS as usize;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SamaritanUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, huge)
+        }));
+        match r {
+            Ok(verdict) => assert!(verdict.is_err(), "huge num_vars should return Err"),
+            Err(_) => panic!("gen_srs_for_testing should not panic on huge num_vars"),
+        }
     }
 }
