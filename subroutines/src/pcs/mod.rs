@@ -5,6 +5,7 @@
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
 mod errors;
+mod gemini;
 mod mulcs;
 mod multilinear_kzg;
 pub(crate) mod profile;

@@ -7,6 +7,10 @@
 //! Prelude
 pub use crate::pcs::{
     errors::PCSError,
+    gemini::{
+        srs::{GeminiProverParam, GeminiUniversalParams, GeminiVerifierParam},
+        GeminiPCS, GeminiProof,
+    },
     mulcs::{
         srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
         MulcsPCS, MulcsProof, MulcsSymmetricPCS, MulcsSymmetricProof,

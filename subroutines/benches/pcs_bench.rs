@@ -8,7 +8,8 @@ use ark_std::{sync::Arc, test_rng};
 use std::time::Instant;
 use subroutines::pcs::{
     prelude::{
-        MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, SamaritanPCS, ZeromorphPCS,
+        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, SamaritanPCS,
+        ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -62,6 +63,7 @@ fn bench_all() -> Result<(), PCSError> {
         let rep = if nv <= 12 { 5 } else { 2 };
 
         bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv, rep)?;
+        bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv, rep)?;
         bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv, rep)?;
         bench_backend::<MulcsSymmetricPCS<Bls12_381>>(&mut rng, "MulcsSymmetric", nv, rep)?;
         bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv, rep)?;
