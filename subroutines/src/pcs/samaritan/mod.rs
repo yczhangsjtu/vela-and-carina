@@ -236,12 +236,6 @@ fn poly_mul<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
     result
 }
 
-fn poly_add_in_place<F: Field>(dst: &mut [F], src: &[F]) {
-    for (i, &c) in src.iter().enumerate() {
-        dst[i] += c;
-    }
-}
-
 fn poly_sub_in_place<F: Field>(dst: &mut [F], src: &[F]) {
     for (i, &c) in src.iter().enumerate() {
         dst[i] -= c;
@@ -509,7 +503,7 @@ fn compute_t_hat<F: Field>(
             let v = t3[i];
             t3[i - m] += v * gamma;
         }
-        for i in (m..t3.len()) {
+        for i in m..t3.len() {
             if !t3[i].is_zero() {
                 let pos = i - m;
                 if t_hat.len() <= pos {
@@ -2098,6 +2092,291 @@ mod tests {
             );
             for (i, (&o, &n)) in old_result.iter().zip(new_result.iter()).enumerate() {
                 assert_eq!(o, n, "nv={nv} p_psi index={i}: old={o:?} new={n:?}");
+            }
+        }
+    }
+
+    // ── compute_t_hat / compute_q_hat reference helpers (old term-by-term) ──
+
+    #[allow(non_snake_case)]
+    fn compute_t_hat_reference<F: Field>(
+        v_psi_phi_combined: &[F],
+        b_hat: &[F],
+        eval: F,
+        v_gamma: F,
+        alpha: F,
+        gamma: F,
+        p_psi_combined: &[F],
+        u_hat: &[F],
+        f_hat: &[F],
+        p_hat: &[F],
+        beta: F,
+        l: usize,
+        m: usize,
+    ) -> Vec<F> {
+        let n = l * m;
+        let zero = F::zero();
+        let spike1 = eval + alpha * v_gamma;
+        let mut t1 = v_psi_phi_combined.to_vec();
+        if t1.len() <= l - 1 {
+            t1.resize(l, zero);
+        }
+        t1[l - 1] -= spike1;
+        poly_sub_in_place(&mut t1, b_hat);
+        let t1: Vec<F> = if t1.len() > l {
+            t1[l..].to_vec()
+        } else {
+            vec![]
+        };
+
+        let mut t2 = p_psi_combined.to_vec();
+        if t2.len() <= m - 1 {
+            t2.resize(m, zero);
+        }
+        t2[m - 1] -= v_gamma;
+        poly_sub_in_place(&mut t2, u_hat);
+        for c in &mut t2 {
+            *c *= beta;
+        }
+        let t2: Vec<F> = if t2.len() > m {
+            t2[m..].to_vec()
+        } else {
+            vec![]
+        };
+
+        let beta2 = beta * beta;
+        let beta3 = beta2 * beta;
+        let max3 = f_hat.len().max(p_hat.len());
+        let mut t3 = vec![zero; max3];
+        for (i, &c) in f_hat.iter().enumerate() {
+            t3[i] += c * beta2;
+        }
+        for (i, &c) in p_hat.iter().enumerate() {
+            t3[i] -= c * beta2;
+        }
+        for i in (m..t3.len()).rev() {
+            let v = t3[i];
+            t3[i - m] += v * gamma;
+        }
+        let t3: Vec<F> = if t3.len() > m {
+            t3[m..].to_vec()
+        } else {
+            vec![]
+        };
+
+        let t4: Vec<F> = f_hat.iter().map(|c| *c * beta3).collect();
+        let beta4 = beta3 * beta;
+        let beta5 = beta4 * beta;
+        let beta6 = beta5 * beta;
+        let s5 = n - m;
+        let mut t5 = vec![zero; s5];
+        for c in p_hat {
+            t5.push(*c * beta4);
+        }
+        let s6 = n - m + 1;
+        let mut t6 = vec![zero; s6];
+        for c in u_hat {
+            t6.push(*c * beta5);
+        }
+        let s7 = n - l + 1;
+        let mut t7 = vec![zero; s7];
+        for c in b_hat {
+            t7.push(*c * beta6);
+        }
+
+        let all: [&[F]; 7] = [&t1, &t2, &t3, &t4, &t5, &t6, &t7];
+        let max_len = all.iter().map(|v| v.len()).max().unwrap_or(0);
+        let mut out = vec![zero; max_len];
+        for t in &all {
+            for (i, &c) in t.iter().enumerate() {
+                if !c.is_zero() {
+                    out[i] += c;
+                }
+            }
+        }
+        while out.last().map_or(false, |c| c.is_zero()) {
+            out.pop();
+        }
+        out
+    }
+
+    #[allow(non_snake_case)]
+    fn compute_q_hat_reference<F: Field>(
+        t_hat: &[F],
+        v_hat: &[F],
+        psi_zy_delta: F,
+        phi_delta: F,
+        psi_zx_delta: F,
+        b_hat: &[F],
+        u_hat: &[F],
+        f_hat: &[F],
+        p_hat: &[F],
+        alpha: F,
+        beta: F,
+        gamma: F,
+        delta: F,
+        v: F,
+        v_gamma: F,
+        l: usize,
+        m: usize,
+    ) -> Result<Vec<F>, PCSError> {
+        let zero = F::zero();
+        let n = l * m;
+        let dli = delta
+            .pow([l as u64])
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProof("".to_string()))?;
+        let dmi = delta
+            .pow([m as u64])
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProof("".to_string()))?;
+        let dmgi = (delta.pow([m as u64]) - gamma)
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProof("".to_string()))?;
+        let t1 = t_hat.to_vec();
+        let pza = psi_zy_delta + alpha * phi_delta;
+        let mut t2 = poly_scalar_mul(v_hat, pza);
+        poly_sub_in_place(&mut t2, b_hat);
+        let cv2 = delta.pow([(l - 1) as u64]) * (v + alpha * v_gamma);
+        if t2.is_empty() {
+            t2 = vec![-cv2];
+        } else {
+            t2[0] -= cv2;
+        }
+        let t2 = poly_scalar_mul(&t2, dli);
+        let mut t3 = poly_scalar_mul(p_hat, psi_zx_delta);
+        poly_sub_in_place(&mut t3, u_hat);
+        let cv3 = v_gamma * delta.pow([(m - 1) as u64]);
+        if t3.is_empty() {
+            t3 = vec![-cv3];
+        } else {
+            t3[0] -= cv3;
+        }
+        let t3 = poly_scalar_mul(&t3, dmi * beta);
+        let beta2 = beta * beta;
+        let max4 = f_hat.len().max(p_hat.len());
+        let mut t4 = vec![zero; max4];
+        for (i, &c) in f_hat.iter().enumerate() {
+            t4[i] += c;
+        }
+        for (i, &c) in p_hat.iter().enumerate() {
+            t4[i] -= c;
+        }
+        let t4 = poly_scalar_mul(&t4, beta2 * dmgi);
+        let beta3 = beta2 * beta;
+        let beta4 = beta3 * beta;
+        let beta5 = beta4 * beta;
+        let beta6 = beta5 * beta;
+        let t5 = poly_scalar_mul(f_hat, beta3);
+        let t6 = poly_scalar_mul(p_hat, beta4 * delta.pow([(n - m) as u64]));
+        let t7 = poly_scalar_mul(u_hat, beta5 * delta.pow([(n - m + 1) as u64]));
+        let t8 = poly_scalar_mul(b_hat, beta6 * delta.pow([(n - l + 1) as u64]));
+        let sub: [&[F]; 7] = [&t2, &t3, &t4, &t5, &t6, &t7, &t8];
+        let max_len = t1.len().max(sub.iter().map(|v| v.len()).max().unwrap_or(0));
+        let mut out = vec![zero; max_len];
+        for (i, &c) in t1.iter().enumerate() {
+            out[i] += c;
+        }
+        for t in &sub {
+            for (i, &c) in t.iter().enumerate() {
+                if !c.is_zero() {
+                    out[i] -= c;
+                }
+            }
+        }
+        while out.last().map_or(false, |c| c.is_zero()) {
+            out.pop();
+        }
+        Ok(out)
+    }
+
+    // ── Equivalence tests ──
+
+    #[test]
+    fn test_compute_t_hat_in_place_matches_reference() {
+        let mut rng = test_rng();
+        let configs = [(2, 2), (4, 4), (8, 4)];
+        for &(_l, _m) in &configs {
+            let l = _l;
+            let m = _m;
+            let n = l * m;
+            let vpc = vec![Fr::rand(&mut rng); n];
+            let b = vec![Fr::rand(&mut rng); l];
+            let ptc = vec![Fr::rand(&mut rng); n];
+            let u = vec![Fr::rand(&mut rng); m];
+            let fh = vec![Fr::rand(&mut rng); n];
+            let ph = vec![Fr::rand(&mut rng); m];
+            let eval = Fr::rand(&mut rng);
+            let vg = Fr::rand(&mut rng);
+            let alpha = Fr::rand(&mut rng);
+            let gamma = Fr::rand(&mut rng);
+            let beta = Fr::rand(&mut rng);
+            let old = compute_t_hat_reference(
+                &vpc, &b, eval, vg, alpha, gamma, &ptc, &u, &fh, &ph, beta, l, m,
+            );
+            let new = compute_t_hat(
+                &vpc, &b, eval, vg, alpha, gamma, &ptc, &u, &fh, &ph, beta, l, m,
+            );
+            assert_eq!(
+                old.len(),
+                new.len(),
+                "(l,m)=({l},{m}): t_hat length mismatch"
+            );
+            for (i, (&o, &n)) in old.iter().zip(new.iter()).enumerate() {
+                assert_eq!(o, n, "(l,m)=({l},{m}) idx={i}: old={o:?} new={n:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_compute_q_hat_in_place_matches_reference() {
+        let mut rng = test_rng();
+        let configs = [(2, 2), (4, 4), (8, 4)];
+        for &(_l, _m) in &configs {
+            let l = _l;
+            let m = _m;
+            let th = vec![Fr::rand(&mut rng); l * m];
+            let vh = vec![Fr::rand(&mut rng); l];
+            let b = vec![Fr::rand(&mut rng); l];
+            let u = vec![Fr::rand(&mut rng); m];
+            let fh = vec![Fr::rand(&mut rng); l * m];
+            let ph = vec![Fr::rand(&mut rng); m];
+            let psi_zy = Fr::rand(&mut rng);
+            let phi_d = Fr::rand(&mut rng);
+            let psi_zx = Fr::rand(&mut rng);
+            let alpha = Fr::rand(&mut rng);
+            let beta = Fr::rand(&mut rng);
+            let gamma = loop {
+                let g = Fr::rand(&mut rng);
+                if !g.is_zero() {
+                    break g;
+                }
+            };
+            let delta = loop {
+                let d = Fr::rand(&mut rng);
+                if !d.is_zero() && d.pow([m as u64]) != gamma {
+                    break d;
+                }
+            };
+            let v = Fr::rand(&mut rng);
+            let vg = Fr::rand(&mut rng);
+            let old = compute_q_hat_reference(
+                &th, &vh, psi_zy, phi_d, psi_zx, &b, &u, &fh, &ph, alpha, beta, gamma, delta, v,
+                vg, l, m,
+            )
+            .unwrap();
+            let new = compute_q_hat(
+                &th, &vh, psi_zy, phi_d, psi_zx, &b, &u, &fh, &ph, alpha, beta, gamma, delta, v,
+                vg, l, m,
+            )
+            .unwrap();
+            assert_eq!(
+                old.len(),
+                new.len(),
+                "(l,m)=({l},{m}): q_hat length mismatch"
+            );
+            for (i, (&o, &n)) in old.iter().zip(new.iter()).enumerate() {
+                assert_eq!(o, n, "(l,m)=({l},{m}) idx={i}: old={o:?} new={n:?}");
             }
         }
     }
