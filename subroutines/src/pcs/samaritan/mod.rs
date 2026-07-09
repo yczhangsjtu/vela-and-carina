@@ -83,7 +83,9 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for SamaritanPCS<E> {
         nv: Option<usize>,
     ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
         let nv = nv.ok_or_else(|| PCSError::InvalidParameters("need num_var".to_string()))?;
-        srs.borrow().trim(1 << nv)
+        let n = checked_domain_size_from_mu(nv, "trim")
+            .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
+        srs.borrow().trim(n)
     }
 
     fn commit(
@@ -92,7 +94,8 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for SamaritanPCS<E> {
     ) -> Result<Self::Commitment, PCSError> {
         let pp = pp.borrow();
         let nv = poly.num_vars;
-        let n = 1 << nv;
+        let n = checked_domain_size_from_mu(nv, "commit")
+            .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
         if pp.max_degree < n {
             return Err(PCSError::InvalidParameters(format!(
                 "degree {} > max {}",
@@ -103,7 +106,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for SamaritanPCS<E> {
         let coeffs = poly.to_evaluations();
         drop(_t);
         let _t = ScopedTimer::new(BACKEND, nv, n, "commit_msm", coeffs.len(), "KZG-MSM");
-        let cm = pp.commit(&coeffs);
+        let cm = pp.try_commit(&coeffs)?;
         drop(_t);
         Ok(Commitment(cm))
     }
@@ -153,7 +156,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for SamaritanPCS<E> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Verifier safety helper
+// Verifier safety helpers
 // ═══════════════════════════════════════════════════════════════════
 
 fn checked_domain_size_from_mu(mu: usize, label: &str) -> Result<usize, PCSError> {
@@ -168,6 +171,38 @@ fn checked_domain_size_from_mu(mu: usize, label: &str) -> Result<usize, PCSError
     1usize
         .checked_shl(mu as u32)
         .ok_or_else(|| PCSError::InvalidProof(format!("{label}: mu {mu} overflow in shift")))
+}
+
+/// Compute n = 2^mu, kappa = round(log2(mu)), nu = mu - kappa,
+/// m = 2^kappa, l = 2^nu. All shifts are checked.
+fn checked_split_params(
+    mu: usize,
+    label: &str,
+) -> Result<(usize, usize, usize, usize, usize), PCSError> {
+    let n = checked_domain_size_from_mu(mu, label)?;
+    let kappa = (mu as f64).log2().round() as usize;
+    if kappa >= usize::BITS as usize {
+        return Err(PCSError::InvalidProof(format!(
+            "{label}: kappa {kappa} overflow"
+        )));
+    }
+    let nu = if mu >= kappa {
+        mu - kappa
+    } else {
+        return Err(PCSError::InvalidProof(format!(
+            "{label}: kappa {kappa} > mu {mu}"
+        )));
+    };
+    if nu >= usize::BITS as usize {
+        return Err(PCSError::InvalidProof(format!("{label}: nu {nu} overflow")));
+    }
+    let m = 1usize.checked_shl(kappa as u32).ok_or_else(|| {
+        PCSError::InvalidProof(format!("{label}: m shift overflow kappa={kappa}"))
+    })?;
+    let l = 1usize
+        .checked_shl(nu as u32)
+        .ok_or_else(|| PCSError::InvalidProof(format!("{label}: l shift overflow nu={nu}")))?;
+    Ok((n, kappa, nu, m, l))
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -626,7 +661,8 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<(SamaritanProof<E>, E::ScalarField), PCSError> {
     let mu = poly.num_vars();
-    let n = 1 << mu;
+    let (n, kappa, nu, m, l) =
+        checked_split_params(mu, "open").map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
 
     if point.len() != mu {
         return Err(PCSError::InvalidParameters(
@@ -642,15 +678,10 @@ fn samaritan_open_with_transcript<E: Pairing>(
         .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
 
     // Bind commitment, point, eval to transcript
-    let commitment = pp.commit(&coeffs);
+    let commitment = pp.try_commit(&coeffs)?;
     transcript.append_serializable_element(b"commitment", &commitment)?;
     transcript.append_serializable_element(b"point", &point.to_vec())?;
     transcript.append_field_element(b"eval", &eval)?;
-
-    let kappa = (mu as f64).log2().round() as usize;
-    let nu = mu - kappa;
-    let m = 1 << kappa;
-    let l = 1 << nu;
 
     let f_hat = coeffs;
 
@@ -669,7 +700,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         v_hat.len(),
         "KZG-commit-v",
     );
-    let v_hat_commit = pp.commit(&v_hat);
+    let v_hat_commit = pp.try_commit(&v_hat)?;
     transcript.append_serializable_element(b"v_hat_commit", &v_hat_commit)?;
     drop(_t_cm_v);
 
@@ -696,7 +727,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         p_hat.len(),
         "KZG-commit-p",
     );
-    let p_hat_commit = pp.commit(&p_hat);
+    let p_hat_commit = pp.try_commit(&p_hat)?;
     transcript.append_serializable_element(b"p_hat_commit", &p_hat_commit)?;
     drop(_t_cm_p);
 
@@ -744,7 +775,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         b_hat.len(),
         "KZG-commit-b",
     );
-    let b_hat_commit = pp.commit(&b_hat);
+    let b_hat_commit = pp.try_commit(&b_hat)?;
     transcript.append_serializable_element(b"b_hat_commit", &b_hat_commit)?;
     drop(_t_cm_b);
 
@@ -769,7 +800,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         u_hat.len(),
         "KZG-commit-u",
     );
-    let u_hat_commit = pp.commit(&u_hat);
+    let u_hat_commit = pp.try_commit(&u_hat)?;
     transcript.append_serializable_element(b"u_hat_commit", &u_hat_commit)?;
     drop(_t_cm_u);
 
@@ -804,7 +835,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         t_hat.len(),
         "KZG-commit-t",
     );
-    let t_hat_commit = pp.commit(&t_hat);
+    let t_hat_commit = pp.try_commit(&t_hat)?;
     transcript.append_serializable_element(b"t_hat_commit", &t_hat_commit)?;
     drop(_t_cm_t);
 
@@ -824,7 +855,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         v.extend_from_slice(&t_hat);
         v
     };
-    let s_hat_commit = pp.commit(&s_hat);
+    let s_hat_commit = pp.try_commit(&s_hat)?;
     transcript.append_serializable_element(b"s_hat_commit", &s_hat_commit)?;
     drop(_t_cm_s);
 
@@ -867,7 +898,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
         "KZG-commit-q-proof",
     );
     let q_quotient = kzg_prove_quotient(&q_hat, delta);
-    let q_eval_proof = pp.commit(&q_quotient);
+    let q_eval_proof = pp.try_commit(&q_quotient)?;
     drop(_t_proof);
 
     let proof = SamaritanProof {
@@ -898,7 +929,23 @@ fn samaritan_verify_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<bool, PCSError> {
     let mu = proof.mu;
-    let n = checked_domain_size_from_mu(mu, "verify")?;
+
+    // --- vk bound checks (before any computation) ---
+    if mu > vp.max_num_vars {
+        return Err(PCSError::InvalidProof(format!(
+            "verify: proof.mu {} exceeds vp.max_num_vars {}",
+            mu, vp.max_num_vars
+        )));
+    }
+
+    let (n, kappa, nu, m, l) = checked_split_params(mu, "verify")?;
+
+    if n > vp.max_degree {
+        return Err(PCSError::InvalidProof(format!(
+            "verify: n={} exceeds vp.max_degree={}",
+            n, vp.max_degree
+        )));
+    }
 
     if point.len() != mu {
         return Err(PCSError::InvalidProof(format!(
@@ -909,11 +956,6 @@ fn samaritan_verify_with_transcript<E: Pairing>(
     }
 
     let _t_total = ScopedTimer::new(BACKEND, mu, n, "samaritan_verify_total", 1, "total");
-
-    let kappa = (mu as f64).log2().round() as usize;
-    let nu = mu - kappa;
-    let m = 1 << kappa;
-    let l = 1 << nu;
 
     // Replay transcript absorption
     transcript.append_serializable_element(b"commitment", &commitment.0)?;
@@ -942,7 +984,7 @@ fn samaritan_verify_with_transcript<E: Pairing>(
         BACKEND,
         mu,
         n,
-        "samaritan_verify_compute_q_commit",
+        "samaritan_verify_q_hat_commit",
         13,
         "MSM-q-commit",
     );
@@ -1019,7 +1061,8 @@ fn samaritan_sumcheck_multi_open<E: Pairing>(
         return Err(PCSError::InvalidParameters("length mismatch".to_string()));
     }
     let num_var = polynomials[0].num_vars;
-    let _n = 1 << num_var;
+    let _n = checked_domain_size_from_mu(num_var, "multi_open")
+        .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
     let k = polynomials.len();
     for p in polynomials {
         if p.num_vars != num_var {
@@ -1139,6 +1182,27 @@ fn samaritan_sumcheck_batch_verify<E: Pairing>(
     }
     let k = f_i_commitments.len();
     let num_var = proof.sum_check_proof.point.len();
+
+    // --- guard untrusted num_var ---
+    if num_var == 0 {
+        return Err(PCSError::InvalidProof(
+            "batch_verify: num_var is zero".to_string(),
+        ));
+    }
+    if num_var > vp.max_num_vars {
+        return Err(PCSError::InvalidProof(format!(
+            "batch_verify: num_var {} exceeds vp.max_num_vars {}",
+            num_var, vp.max_num_vars
+        )));
+    }
+    let _n = checked_domain_size_from_mu(num_var, "batch_verify")?;
+    if _n > vp.max_degree {
+        return Err(PCSError::InvalidProof(format!(
+            "batch_verify: n={_n} exceeds vp.max_degree={}",
+            vp.max_degree
+        )));
+    }
+
     for pt in points {
         if pt.len() != num_var {
             return Err(PCSError::InvalidProof("point length mismatch".to_string()));
@@ -1652,6 +1716,155 @@ mod tests {
             &mut IOPTranscript::new(b"t"),
         );
         assert!(r2.is_err() || !r2.unwrap());
+        Ok(())
+    }
+
+    // ── vk bound checks ──
+
+    #[test]
+    fn test_samaritan_verify_rejects_mu_above_vk_bound() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let big_nv = 6;
+        let small_nv = 4;
+        let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, big_nv)?;
+        // Trim to small_nv to get restricted vk, large ck for proof
+        let (big_ck, _) = SamaritanPCS::<E>::trim(&srs, None, Some(big_nv))?;
+        let (_, small_vk) = SamaritanPCS::<E>::trim(&srs, None, Some(small_nv))?;
+        let p = rpoly(big_nv, &mut rng);
+        let pt = rpt(big_nv, &mut rng);
+        let com = SamaritanPCS::<E>::commit(&big_ck, &p)?;
+        let (proof, val) = SamaritanPCS::<E>::open(&big_ck, &p, &pt)?;
+        let r = SamaritanPCS::<E>::verify(&small_vk, &com, &pt, &val, &proof);
+        assert!(r.is_err(), "mu above vk bound should return Error");
+        Ok(())
+    }
+
+    #[test]
+    fn test_samaritan_verify_rejects_degree_above_vk_bound() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let big_nv = 6;
+        let small_nv = 4;
+        let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, big_nv)?;
+        let (big_ck, _) = SamaritanPCS::<E>::trim(&srs, None, Some(big_nv))?;
+        // Trim SRS to 2^small_nv which gives small max_degree
+        let (_, small_vk) = srs.trim(1 << small_nv)?;
+        let p = rpoly(big_nv, &mut rng);
+        let pt = rpt(big_nv, &mut rng);
+        let com = SamaritanPCS::<E>::commit(&big_ck, &p)?;
+        let (proof, val) = SamaritanPCS::<E>::open(&big_ck, &p, &pt)?;
+        let r = SamaritanPCS::<E>::verify(&small_vk, &com, &pt, &val, &proof);
+        assert!(r.is_err(), "degree above vk bound should return Error");
+        Ok(())
+    }
+
+    // ── SRS too small without panic ──
+
+    #[test]
+    fn test_samaritan_commit_rejects_srs_too_small_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let big_nv = 4;
+        let tiny_nv = 2;
+        let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, big_nv)?;
+        let (tiny_ck, _) = SamaritanPCS::<E>::trim(&srs, None, Some(tiny_nv))?;
+        let big_poly = rpoly(big_nv, &mut rng);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SamaritanPCS::<E>::commit(&tiny_ck, &big_poly)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err(),
+                "commit with too-small SRS should return Err"
+            ),
+            Err(_) => panic!("commit should not panic on too-small SRS"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_samaritan_open_rejects_srs_too_small_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let big_nv = 4;
+        let tiny_nv = 2;
+        let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, big_nv)?;
+        let (tiny_ck, _) = SamaritanPCS::<E>::trim(&srs, None, Some(tiny_nv))?;
+        let big_poly = rpoly(big_nv, &mut rng);
+        let pt = rpt(big_nv, &mut rng);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SamaritanPCS::<E>::open(&tiny_ck, &big_poly, &pt)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err(),
+                "open with too-small SRS should return Err"
+            ),
+            Err(_) => panic!("open should not panic on too-small SRS"),
+        }
+        Ok(())
+    }
+
+    // ── Batch verify huge num_var / above vk bound ──
+
+    #[test]
+    fn test_samaritan_batch_verify_rejects_huge_num_var_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 2;
+        let (ck, vk) = setup(nv);
+        let polys: Vec<_> = (0..1).map(|_| rpoly(nv, &mut rng)).collect();
+        let pts: Vec<_> = polys.iter().map(|_| rpt(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(pts.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| SamaritanPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"t");
+        tp.append_field_element(b"init", &Fr::zero())?;
+        let mut proof = SamaritanPCS::<E>::multi_open(&ck, &polys, &pts, &evals, &mut tp)?;
+        proof.sum_check_proof.point = vec![Fr::zero(); usize::BITS as usize];
+        let mut tv = IOPTranscript::new(b"t");
+        tv.append_field_element(b"init", &Fr::zero())?;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SamaritanPCS::<E>::batch_verify(&vk, &comms, &pts, &proof, &mut tv)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "huge num_var should fail"
+            ),
+            Err(_) => panic!("caught panic on huge num_var — should not panic"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_samaritan_batch_verify_rejects_num_var_above_vk_bound() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let big_nv = 4;
+        let small_nv = 2;
+        let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, big_nv)?;
+        let (big_ck, _) = SamaritanPCS::<E>::trim(&srs, None, Some(big_nv))?;
+        let (_, small_vk) = SamaritanPCS::<E>::trim(&srs, None, Some(small_nv))?;
+        let polys: Vec<_> = (0..1).map(|_| rpoly(big_nv, &mut rng)).collect();
+        let pts: Vec<_> = polys.iter().map(|_| rpt(big_nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(pts.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| SamaritanPCS::<E>::commit(&big_ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"t");
+        tp.append_field_element(b"init", &Fr::zero())?;
+        let proof = SamaritanPCS::<E>::multi_open(&big_ck, &polys, &pts, &evals, &mut tp)?;
+        let mut tv = IOPTranscript::new(b"t");
+        tv.append_field_element(b"init", &Fr::zero())?;
+        let r = SamaritanPCS::<E>::batch_verify(&small_vk, &comms, &pts, &proof, &mut tv);
+        assert!(r.is_err(), "num_var above vk bound should return Error");
         Ok(())
     }
 

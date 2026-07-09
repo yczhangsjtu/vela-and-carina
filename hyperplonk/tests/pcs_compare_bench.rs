@@ -1,4 +1,5 @@
-//! HyperPlonk PCS comparison benchmark: mKZG vs Mulcs vs Zeromorph
+//! HyperPlonk PCS comparison benchmark: mKZG vs Mulcs vs MulcsSymmetric vs
+//! Zeromorph vs Samaritan
 //!
 //! **These tests are `#[ignore]` and do not run in default `cargo test`.**
 //!
@@ -21,7 +22,7 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MultilinearKzgPCS, ZeromorphPCS},
+            prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -161,6 +162,82 @@ mod tests {
                 );
                 assert!(ok);
             },
+            "MulcsSymmetric" => {
+                let t0 = Instant::now();
+                let srs = MulcsSymmetricPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) =
+                    <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::preprocess(
+                        &circuit.index,
+                        &srs,
+                    )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!(
+                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
+                    if ok { "pass" } else { "FAIL" }
+                );
+                assert!(ok);
+            },
+            "Samaritan" => {
+                let t0 = Instant::now();
+                let srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) =
+                    <PolyIOP<FrType> as HyperPlonkSNARK<E, SamaritanPCS<E>>>::preprocess(
+                        &circuit.index,
+                        &srs,
+                    )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, SamaritanPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, SamaritanPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!(
+                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
+                    if ok { "pass" } else { "FAIL" }
+                );
+                assert!(ok);
+            },
             _ => panic!("unknown backend: {backend}"),
         }
         Ok(())
@@ -174,7 +251,9 @@ mod tests {
         for &nv in &nvs {
             bench_backend("mKZG", nv)?;
             bench_backend("Mulcs", nv)?;
+            bench_backend("MulcsSymmetric", nv)?;
             bench_backend("Zeromorph", nv)?;
+            bench_backend("Samaritan", nv)?;
         }
         Ok(())
     }

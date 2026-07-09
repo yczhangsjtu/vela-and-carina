@@ -45,14 +45,15 @@ pub struct SamaritanVerifierParam<E: Pairing> {
 }
 
 impl<E: Pairing> SamaritanProverParam<E> {
-    pub fn commit(&self, coeffs: &[E::ScalarField]) -> E::G1Affine {
-        assert!(
-            coeffs.len() <= self.g1_powers.len(),
-            "poly degree {} exceeds SRS max {}",
-            coeffs.len().saturating_sub(1),
-            self.max_degree
-        );
-        E::G1::msm_unchecked(&self.g1_powers[..coeffs.len()], coeffs).into_affine()
+    pub fn try_commit(&self, coeffs: &[E::ScalarField]) -> Result<E::G1Affine, PCSError> {
+        if coeffs.len() > self.g1_powers.len() {
+            return Err(PCSError::InvalidParameters(format!(
+                "poly degree {} exceeds SRS max {}",
+                coeffs.len().saturating_sub(1),
+                self.max_degree
+            )));
+        }
+        Ok(E::G1::msm_unchecked(&self.g1_powers[..coeffs.len()], coeffs).into_affine())
     }
 }
 
