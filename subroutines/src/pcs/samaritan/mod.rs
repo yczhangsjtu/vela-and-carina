@@ -216,6 +216,7 @@ fn poly_eval<F: Field>(coeffs: &[F], x: F) -> F {
     result
 }
 
+#[cfg(test)]
 fn poly_mul<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
     if a.is_empty() || b.is_empty() {
         return vec![];
@@ -268,30 +269,19 @@ fn kzg_prove_quotient<F: Field>(coeffs: &[F], point: F) -> Vec<F> {
     q
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Structured product helpers — avoids O(l^2) / O(m^2) dense conv
-// ═══════════════════════════════════════════════════════════════════
-
-/// Multiply `base` by a tensor-product polynomial Π_i (a_i + b_i·X^{shift_i}).
-/// Each factor contributes via shift-add.  Running time is O(Σ intermediate
-/// lengths) which for shifts {2^0,...,2^{nu-1}} is O(l · nu) ≪ O(l²).
-fn structured_product_multiply<F: Field>(
-    base: &[F],
-    factors: &[(F, F, usize)], // (a_i, b_i, shift_i)
-) -> Vec<F> {
-    let mut cur = base.to_vec();
-    for &(a, b, shift) in factors {
-        let new_len = cur.len() + shift;
-        let mut next = vec![F::zero(); new_len];
-        for (j, &cj) in cur.iter().enumerate() {
-            if !cj.is_zero() {
-                next[j] += a * cj;
-                next[j + shift] += b * cj;
-            }
-        }
-        cur = next;
+/// Add scaled `src` shifted by `shift` into `dst`. Ensures dst is large enough.
+fn add_scaled_shifted<F: Field>(dst: &mut Vec<F>, src: &[F], scale: F, shift: usize) {
+    if scale.is_zero() {
+        return;
     }
-    cur
+    if dst.len() < shift + src.len() {
+        dst.resize(shift + src.len(), F::zero());
+    }
+    for (i, &c) in src.iter().enumerate() {
+        if !c.is_zero() {
+            dst[shift + i] += scale * c;
+        }
+    }
 }
 
 /// Compute r(X) = v(X) * (ψ(X; z) + α·φ(X; γ, ν)).
@@ -375,20 +365,8 @@ fn structured_mul_p_psi<F: Field>(p_hat: &[F], point_kappa: &[F], kappa: usize) 
     cur
 }
 
-/// Add scaled `src` shifted by `shift` to `dst`.
-fn add_scaled_shifted<F: Field>(dst: &mut [F], src: &[F], scale: F, shift: usize) {
-    for (i, &c) in src.iter().enumerate() {
-        if !c.is_zero() {
-            if shift + i < dst.len() {
-                dst[shift + i] += scale * c;
-            } else {
-                break;
-            }
-        }
-    }
-}
-
 /// kappa = round(log2(mu))
+#[cfg(test)]
 fn compute_kappa(mu: usize) -> usize {
     (mu as f64).log2().round() as usize
 }
@@ -458,93 +436,105 @@ fn compute_t_hat<F: Field>(
 ) -> Vec<F> {
     let n = l * m;
     let zero = F::zero();
-
-    let spike1_val = eval + alpha * v_gamma;
-    let mut term1 = v_psi_phi_combined.to_vec();
-    if term1.len() <= l - 1 {
-        term1.resize(l, zero);
-    }
-    term1[l - 1] -= spike1_val;
-    poly_sub_in_place(&mut term1, b_hat);
-    let term1: Vec<F> = if term1.len() > l {
-        term1[l..].to_vec()
-    } else {
-        vec![]
-    };
-
-    let mut term2 = p_psi_combined.to_vec();
-    if term2.len() <= m - 1 {
-        term2.resize(m, zero);
-    }
-    term2[m - 1] -= v_gamma;
-    poly_sub_in_place(&mut term2, u_hat);
-    for c in &mut term2 {
-        *c *= beta;
-    }
-    let term2: Vec<F> = if term2.len() > m {
-        term2[m..].to_vec()
-    } else {
-        vec![]
-    };
-
     let beta2 = beta * beta;
-    let max_len_t3 = f_hat.len().max(p_hat.len());
-    let mut term3 = vec![zero; max_len_t3];
-    for (i, &c) in f_hat.iter().enumerate() {
-        term3[i] += c * beta2;
-    }
-    for (i, &c) in p_hat.iter().enumerate() {
-        term3[i] -= c * beta2;
-    }
-    for i in (m..term3.len()).rev() {
-        let v = term3[i];
-        term3[i - m] += v * gamma;
-    }
-    let term3: Vec<F> = if term3.len() > m {
-        term3[m..].to_vec()
-    } else {
-        vec![]
-    };
-
     let beta3 = beta2 * beta;
-    let term4: Vec<F> = f_hat.iter().map(|c| *c * beta3).collect();
-
     let beta4 = beta3 * beta;
     let beta5 = beta4 * beta;
     let beta6 = beta5 * beta;
 
-    let shift5 = n - m;
-    let term5: Vec<F> = {
-        let mut v = vec![zero; shift5];
-        for c in p_hat {
-            v.push(*c * beta4);
-        }
-        v
-    };
+    let mut t_hat: Vec<F> = vec![];
 
-    let shift6 = n - m + 1;
-    let term6: Vec<F> = {
-        let mut v = vec![zero; shift6];
-        for c in u_hat {
-            v.push(*c * beta5);
+    // term1: (v_psi_phi_combined - spike*X^(l-1) - b_hat) / X^l → shift 0
+    {
+        let spike1_val = eval + alpha * v_gamma;
+        let len1 = v_psi_phi_combined.len().max(l);
+        for i in 0..len1 {
+            let mut val = if i < v_psi_phi_combined.len() {
+                v_psi_phi_combined[i]
+            } else {
+                zero
+            };
+            if i == l.saturating_sub(1) {
+                val -= spike1_val;
+            }
+            if i < b_hat.len() {
+                val -= b_hat[i];
+            }
+            if i >= l && !val.is_zero() {
+                let pos = i - l;
+                if t_hat.len() <= pos {
+                    t_hat.resize(pos + 1, zero);
+                }
+                t_hat[pos] += val;
+            }
         }
-        v
-    };
+    }
 
-    let shift7 = n - l + 1;
-    let term7: Vec<F> = {
-        let mut v = vec![zero; shift7];
-        for c in b_hat {
-            v.push(*c * beta6);
+    // term2: beta * (p_psi_combined - v_gamma*X^(m-1) - u_hat) / X^m → shift 0
+    {
+        let len2 = p_psi_combined.len().max(m);
+        for i in 0..len2 {
+            let mut val = if i < p_psi_combined.len() {
+                p_psi_combined[i]
+            } else {
+                zero
+            };
+            if i == m.saturating_sub(1) {
+                val -= v_gamma;
+            }
+            if i < u_hat.len() {
+                val -= u_hat[i];
+            }
+            if i >= m && !val.is_zero() {
+                let pos = i - m;
+                if t_hat.len() <= pos {
+                    t_hat.resize(pos + 1, zero);
+                }
+                t_hat[pos] += val * beta;
+            }
         }
-        v
-    };
+    }
 
-    let all: [&[F]; 7] = [&term1, &term2, &term3, &term4, &term5, &term6, &term7];
-    let max_len = all.iter().map(|v| v.len()).max().unwrap_or(0);
-    let mut t_hat = vec![zero; max_len];
-    for term in &all {
-        poly_add_in_place(&mut t_hat, term);
+    // term3: beta^2 * (f_hat - p_hat) / (X^m - gamma) → (fold via gamma) then / X^m
+    {
+        let max3 = f_hat.len().max(p_hat.len());
+        let mut t3 = vec![zero; max3];
+        for (i, &c) in f_hat.iter().enumerate() {
+            t3[i] += c * beta2;
+        }
+        for (i, &c) in p_hat.iter().enumerate() {
+            t3[i] -= c * beta2;
+        }
+        for i in (m..t3.len()).rev() {
+            let v = t3[i];
+            t3[i - m] += v * gamma;
+        }
+        for i in (m..t3.len()) {
+            if !t3[i].is_zero() {
+                let pos = i - m;
+                if t_hat.len() <= pos {
+                    t_hat.resize(pos + 1, zero);
+                }
+                t_hat[pos] += t3[i];
+            }
+        }
+    }
+
+    // term4: beta^3 * f_hat → shift 0
+    add_scaled_shifted(&mut t_hat, f_hat, beta3, 0);
+
+    // term5: beta^4 * p_hat → shift n-m
+    add_scaled_shifted(&mut t_hat, p_hat, beta4, n - m);
+
+    // term6: beta^5 * u_hat → shift n-m+1
+    add_scaled_shifted(&mut t_hat, u_hat, beta5, n - m + 1);
+
+    // term7: beta^6 * b_hat → shift n-l+1
+    add_scaled_shifted(&mut t_hat, b_hat, beta6, n - l + 1);
+
+    // Trim trailing zeros
+    while t_hat.last().map_or(false, |c| c.is_zero()) {
+        t_hat.pop();
     }
     t_hat
 }
@@ -575,6 +565,11 @@ fn compute_q_hat<F: Field>(
 ) -> Result<Vec<F>, PCSError> {
     let zero = F::zero();
     let n = l * m;
+    let beta2 = beta * beta;
+    let beta3 = beta2 * beta;
+    let beta4 = beta3 * beta;
+    let beta5 = beta4 * beta;
+    let beta6 = beta5 * beta;
 
     let delta_l_inv = delta
         .pow([l as u64])
@@ -588,58 +583,110 @@ fn compute_q_hat<F: Field>(
         .inverse()
         .ok_or_else(|| PCSError::InvalidParameters("delta^m == gamma".to_string()))?;
 
-    let term1 = t_hat.to_vec();
+    // q_hat = t_hat (term1) minus the sub-terms
+    let mut q_hat = t_hat.to_vec();
 
+    // term2: delta_l_inv * (v_hat*(psi_zy+alpha*phi) - b_hat - const*X^0)
     let psi_zy_alpha_phi = psi_zy_delta + alpha * phi_delta;
-    let mut term2 = poly_scalar_mul(v_hat, psi_zy_alpha_phi);
-    poly_sub_in_place(&mut term2, b_hat);
+    let mut t2 = poly_scalar_mul(v_hat, psi_zy_alpha_phi);
+    poly_sub_in_place(&mut t2, b_hat);
     let const_val2 = delta.pow([(l - 1) as u64]) * (v + alpha * v_gamma);
-    if term2.is_empty() {
-        term2 = vec![-const_val2];
+    if t2.is_empty() {
+        t2 = vec![-const_val2];
     } else {
-        term2[0] -= const_val2;
+        t2[0] -= const_val2;
     }
-    let term2 = poly_scalar_mul(&term2, delta_l_inv);
+    let t2 = poly_scalar_mul(&t2, delta_l_inv);
+    for (i, &c) in t2.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c;
+        }
+    }
 
-    let mut term3 = poly_scalar_mul(p_hat, psi_zx_delta);
-    poly_sub_in_place(&mut term3, u_hat);
+    // term3: delta_m_inv * beta * (p_hat*psi_zx - u_hat - const*X^0)
+    let mut t3 = poly_scalar_mul(p_hat, psi_zx_delta);
+    poly_sub_in_place(&mut t3, u_hat);
     let const_val3 = v_gamma * delta.pow([(m - 1) as u64]);
-    if term3.is_empty() {
-        term3 = vec![-const_val3];
+    if t3.is_empty() {
+        t3 = vec![-const_val3];
     } else {
-        term3[0] -= const_val3;
+        t3[0] -= const_val3;
     }
-    let term3 = poly_scalar_mul(&term3, delta_m_inv * beta);
+    let t3 = poly_scalar_mul(&t3, delta_m_inv * beta);
+    for (i, &c) in t3.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c;
+        }
+    }
 
-    let beta2 = beta * beta;
-    let max_len_t4 = f_hat.len().max(p_hat.len());
-    let mut term4 = vec![zero; max_len_t4];
+    // term4: beta^2 / (delta^m - gamma) * (f_hat - p_hat)
+    let max4 = f_hat.len().max(p_hat.len());
+    let mut t4 = vec![zero; max4];
     for (i, &c) in f_hat.iter().enumerate() {
-        term4[i] += c;
+        t4[i] += c;
     }
     for (i, &c) in p_hat.iter().enumerate() {
-        term4[i] -= c;
+        t4[i] -= c;
     }
-    let term4 = poly_scalar_mul(&term4, beta2 * delta_m_minus_gamma_inv);
+    let t4 = poly_scalar_mul(&t4, beta2 * delta_m_minus_gamma_inv);
+    for (i, &c) in t4.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c;
+        }
+    }
 
-    let beta3 = beta2 * beta;
-    let beta4 = beta3 * beta;
-    let beta5 = beta4 * beta;
-    let beta6 = beta5 * beta;
+    // term5-8: direct in-place scaled subtraction via add_scaled_shifted with
+    // negative sign t5: -beta^3 * f_hat → shift 0
+    for (i, &c) in f_hat.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c * beta3;
+        }
+    }
+    // t6: -beta^4 * delta^(n-m) * p_hat → shift 0
+    let s6 = beta4 * delta.pow([(n - m) as u64]);
+    for (i, &c) in p_hat.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c * s6;
+        }
+    }
+    // t7: -beta^5 * delta^(n-m+1) * u_hat → shift 0
+    let s7 = beta5 * delta.pow([(n - m + 1) as u64]);
+    for (i, &c) in u_hat.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c * s7;
+        }
+    }
+    // t8: -beta^6 * delta^(n-l+1) * b_hat → shift 0
+    let s8 = beta6 * delta.pow([(n - l + 1) as u64]);
+    for (i, &c) in b_hat.iter().enumerate() {
+        if !c.is_zero() {
+            if q_hat.len() <= i {
+                q_hat.resize(i + 1, zero);
+            }
+            q_hat[i] -= c * s8;
+        }
+    }
 
-    let term5 = poly_scalar_mul(f_hat, beta3);
-    let term6 = poly_scalar_mul(p_hat, beta4 * delta.pow([(n - m) as u64]));
-    let term7 = poly_scalar_mul(u_hat, beta5 * delta.pow([(n - m + 1) as u64]));
-    let term8 = poly_scalar_mul(b_hat, beta6 * delta.pow([(n - l + 1) as u64]));
-
-    let sub_terms: [&[F]; 7] = [&term2, &term3, &term4, &term5, &term6, &term7, &term8];
-    let max_len = term1
-        .len()
-        .max(sub_terms.iter().map(|v| v.len()).max().unwrap_or(0));
-    let mut q_hat = vec![zero; max_len];
-    poly_add_in_place(&mut q_hat, &term1);
-    for t in &sub_terms {
-        poly_sub_in_place(&mut q_hat, t);
+    while q_hat.last().map_or(false, |c| c.is_zero()) {
+        q_hat.pop();
     }
     Ok(q_hat)
 }
@@ -2005,6 +2052,52 @@ mod tests {
             );
             for (i, (&o, &n)) in old_result.iter().zip(new_result.iter()).enumerate() {
                 assert_eq!(o, n, "nv={nv} index={i}: old={o:?} new={n:?}");
+            }
+        }
+    }
+
+    // ── Structured p_hat * psi_zx equivalence ──
+
+    #[test]
+    fn test_structured_vs_dense_p_psi() {
+        let mut rng = test_rng();
+        for nv in [2, 4, 6] {
+            let mu = nv;
+            let kappa = compute_kappa(mu);
+            let m = 1 << kappa;
+            let point: Vec<Fr> = (0..mu).map(|_| Fr::rand(&mut rng)).collect();
+            let p_hat: Vec<Fr> = (0..m).map(|_| Fr::rand(&mut rng)).collect();
+
+            // Old: dense poly_mul(p_hat, psi_zx)
+            let old_psi_zx = {
+                let mut acc = vec![Fr::one()];
+                for i in 0..kappa {
+                    let s = 1 << i;
+                    let z = point[i];
+                    let new_len = acc.len() + s;
+                    let mut next = vec![Fr::zero(); new_len];
+                    for (j, &c) in acc.iter().enumerate() {
+                        next[j] += z * c;
+                        next[j + s] += (Fr::one() - z) * c;
+                    }
+                    acc = next;
+                }
+                acc
+            };
+            let old_result = poly_mul(&p_hat, &old_psi_zx);
+
+            // New: structured
+            let new_result = structured_mul_p_psi(&p_hat, &point[..kappa], kappa);
+
+            assert_eq!(
+                old_result.len(),
+                new_result.len(),
+                "nv={nv}: p_psi length mismatch old={} new={}",
+                old_result.len(),
+                new_result.len()
+            );
+            for (i, (&o, &n)) in old_result.iter().zip(new_result.iter()).enumerate() {
+                assert_eq!(o, n, "nv={nv} p_psi index={i}: old={o:?} new={n:?}");
             }
         }
     }
