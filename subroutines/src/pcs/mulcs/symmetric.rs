@@ -38,7 +38,7 @@ use transcript::IOPTranscript;
 
 use super::{
     srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
-    util::UnivarPoly,
+    UnivarPoly,
 };
 
 pub struct MulcsSymmetricPCS<E: Pairing> {

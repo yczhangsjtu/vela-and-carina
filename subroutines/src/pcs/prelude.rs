@@ -16,6 +16,10 @@ pub use crate::pcs::{
         srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam},
         MultilinearKzgPCS, MultilinearKzgProof,
     },
+    samaritan::{
+        srs::{SamaritanProverParam, SamaritanUniversalParams, SamaritanVerifierParam},
+        SamaritanPCS, SamaritanProof,
+    },
     structs::Commitment,
     univariate_kzg::{
         srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam},
