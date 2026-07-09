@@ -802,7 +802,21 @@ fn symmetric_sumcheck_batch_verify<E: Pairing>(
     }
     let k = f_i_commitments.len();
     let num_var = proof.sum_check_proof.point.len();
-    let n = 1 << num_var;
+
+    // --- integrity checks on untrusted num_var (before any shift) ---
+    if num_var == 0 {
+        return Err(PCSError::InvalidProof("num_var is zero".to_string()));
+    }
+    if num_var >= usize::BITS as usize {
+        return Err(PCSError::InvalidProof(format!(
+            "num_var {} exceeds platform word size",
+            num_var
+        )));
+    }
+    let n = 1usize
+        .checked_shl(num_var as u32)
+        .ok_or_else(|| PCSError::InvalidProof(format!("num_var {} overflow in shift", num_var)))?;
+
     let _t_total = profile::ScopedTimer::new(
         BACKEND,
         num_var,
@@ -1610,6 +1624,45 @@ mod tests {
             let hbar = compute_symmetric_hbar(&laurent_h, offset, Fr::rand(&mut rng));
             assert_eq!(hbar.len(), n - 1, "hbar should have N-1 coefficients");
         }
+    }
+
+    // ── Batch verify rejects huge num_var without panicking ──
+
+    #[test]
+    fn test_sym_batch_verify_rejects_huge_num_var_without_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 2;
+        let (ck, vk) = setup(nv);
+        let polys: Vec<_> = (0..1).map(|_| rpoly(nv, &mut rng)).collect();
+        let points: Vec<_> = polys.iter().map(|_| rpt(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(p, pt)| p.evaluate(pt).unwrap())
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| MulcsSymmetricPCS::<E>::commit(&ck, p).unwrap())
+            .collect();
+        let mut tp = IOPTranscript::new(b"test");
+        tp.append_field_element(b"init", &Fr::ZERO)?;
+        let mut proof = MulcsSymmetricPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+
+        proof.sum_check_proof.point = vec![Fr::zero(); usize::BITS as usize];
+        let mut tv = IOPTranscript::new(b"test");
+        tv.append_field_element(b"init", &Fr::ZERO)?;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            MulcsSymmetricPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "huge num_var ({}) should fail without panic",
+                proof.sum_check_proof.point.len()
+            ),
+            Err(_) => panic!("caught panic on huge num_var — should not panic"),
+        }
+        Ok(())
     }
 
     fn assert_sym_rejects(r: Result<bool, PCSError>) {
