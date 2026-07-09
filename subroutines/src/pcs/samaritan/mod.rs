@@ -32,7 +32,6 @@ use ark_std::{
 use std::{collections::BTreeMap, iter, ops::Deref};
 use transcript::IOPTranscript;
 
-use super::mulcs::UnivarPoly;
 use srs::{SamaritanProverParam, SamaritanUniversalParams, SamaritanVerifierParam};
 
 const BACKEND: &str = "Samaritan";
@@ -270,13 +269,147 @@ fn kzg_prove_quotient<F: Field>(coeffs: &[F], point: F) -> Vec<F> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Structured products (psi-hat, phi-hat)
+// Structured product helpers — avoids O(l^2) / O(m^2) dense conv
 // ═══════════════════════════════════════════════════════════════════
 
-/// ψ̂(X; z) = Π_{i=0}^{count-1} (z_i + (1-z_i)·X^{2^i})
-fn compute_psi_hat_prod<F: Field>(point_slice: &[F], count: usize) -> Vec<F> {
-    assert_eq!(point_slice.len(), count);
-    UnivarPoly::structured_eq_product(count, point_slice).coeffs
+/// Multiply `base` by a tensor-product polynomial Π_i (a_i + b_i·X^{shift_i}).
+/// Each factor contributes via shift-add.  Running time is O(Σ intermediate
+/// lengths) which for shifts {2^0,...,2^{nu-1}} is O(l · nu) ≪ O(l²).
+fn structured_product_multiply<F: Field>(
+    base: &[F],
+    factors: &[(F, F, usize)], // (a_i, b_i, shift_i)
+) -> Vec<F> {
+    let mut cur = base.to_vec();
+    for &(a, b, shift) in factors {
+        let new_len = cur.len() + shift;
+        let mut next = vec![F::zero(); new_len];
+        for (j, &cj) in cur.iter().enumerate() {
+            if !cj.is_zero() {
+                next[j] += a * cj;
+                next[j + shift] += b * cj;
+            }
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// Compute r(X) = v(X) * (ψ(X; z) + α·φ(X; γ, ν)).
+///
+/// We compute v*ψ and v*φ separately using structured tensor-product
+/// multiplication, then combine: r = v*ψ + α·(v*φ).
+/// Each structured product is O(l·nu) instead of O(l²).
+fn structured_mul_v_psi_plus_alpha_phi<F: Field>(
+    v_hat: &[F],
+    point_nu: &[F],
+    nu: usize,
+    gamma: F,
+    alpha: F,
+) -> Vec<F> {
+    let one = F::one();
+
+    // v * ψ  (psi factor: z_i + (1-z_i)·X^{2^i})
+    let mut v_psi = v_hat.to_vec();
+    for i in 0..nu {
+        let shift = 1 << i;
+        let z = point_nu[i];
+        let new_len = v_psi.len() + shift;
+        let mut next = vec![F::zero(); new_len];
+        for (j, &cj) in v_psi.iter().enumerate() {
+            if !cj.is_zero() {
+                next[j] += z * cj;
+                next[j + shift] += (one - z) * cj;
+            }
+        }
+        v_psi = next;
+    }
+
+    // v * φ  (phi factor: γ^{2^i} + X^{2^i})
+    let mut v_phi = v_hat.to_vec();
+    let mut gamma_pow = gamma;
+    for i in 0..nu {
+        let shift = 1 << i;
+        let new_len = v_phi.len() + shift;
+        let mut next = vec![F::zero(); new_len];
+        for (j, &cj) in v_phi.iter().enumerate() {
+            if !cj.is_zero() {
+                next[j] += gamma_pow * cj;
+                next[j + shift] += cj;
+            }
+        }
+        v_phi = next;
+        gamma_pow *= gamma_pow;
+    }
+
+    // r = v*ψ + α·(v*φ)
+    let out_len = v_psi.len().max(v_phi.len());
+    let mut result = vec![F::zero(); out_len];
+    for (i, &c) in v_psi.iter().enumerate() {
+        result[i] += c;
+    }
+    for (i, &c) in v_phi.iter().enumerate() {
+        result[i] += alpha * c;
+    }
+    result
+}
+
+/// Compute r(X) = p(X) · ψ(X; zx)  with ψ factorized as above.
+fn structured_mul_p_psi<F: Field>(p_hat: &[F], point_kappa: &[F], kappa: usize) -> Vec<F> {
+    let one = F::one();
+    let mut cur = p_hat.to_vec();
+    for i in 0..kappa {
+        let shift = 1 << i;
+        let z = point_kappa[i];
+        let a = z; // ψ-factor: z + (1-z)·X^{shift}
+        let b = one - z;
+        let new_len = cur.len() + shift;
+        let mut next = vec![F::zero(); new_len];
+        for (j, &cj) in cur.iter().enumerate() {
+            if !cj.is_zero() {
+                next[j] += a * cj;
+                next[j + shift] += b * cj;
+            }
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// Add scaled `src` shifted by `shift` to `dst`.
+fn add_scaled_shifted<F: Field>(dst: &mut [F], src: &[F], scale: F, shift: usize) {
+    for (i, &c) in src.iter().enumerate() {
+        if !c.is_zero() {
+            if shift + i < dst.len() {
+                dst[shift + i] += scale * c;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// kappa = round(log2(mu))
+fn compute_kappa(mu: usize) -> usize {
+    (mu as f64).log2().round() as usize
+}
+
+/// Get evaluation set — partial evaluation of kappa variables (in-place style).
+fn get_evaluation_set<F: Field>(poly_evals: &[F], point: &[F], kappa: usize) -> Vec<F> {
+    let sz = poly_evals.len();
+    let mut evals = poly_evals.to_vec();
+    for i in 0..kappa {
+        let step = 1 << (i + 1);
+        let half = 1 << i;
+        for j in (0..sz).step_by(step) {
+            evals[j] = (F::one() - point[i]) * evals[j] + point[i] * evals[j + half];
+        }
+    }
+    let step = 1 << kappa;
+    let mut res = Vec::with_capacity(sz / step);
+    for i in (0..sz).step_by(step) {
+        res.push(evals[i]);
+    }
+    res
 }
 
 /// Evaluate ψ̂ at delta: Π_i (z_i + (1-z_i)·delta^{2^i})
@@ -288,25 +421,6 @@ fn evaluate_psi_hat_at<F: Field>(point_slice: &[F], delta: F) -> F {
         delta_pow *= delta_pow;
     }
     acc
-}
-
-/// φ̂(X;γ,ν) = Π_{i=0}^{ν-1} (γ^{2^i} + X^{2^i})
-fn compute_phi_hat<F: Field>(gamma: F, nu: usize) -> Vec<F> {
-    let mut result = vec![F::one()];
-    let mut gamma_pow = gamma;
-    for i in 0..nu {
-        let shift = 1 << i;
-        let n = result.len();
-        let new_len = n + shift;
-        let mut new_coeffs = vec![F::zero(); new_len];
-        for j in 0..n {
-            new_coeffs[j] += result[j] * gamma_pow;
-            new_coeffs[j + shift] += result[j];
-        }
-        result = new_coeffs;
-        gamma_pow *= gamma_pow;
-    }
-    result
 }
 
 /// Evaluate φ̂(X;γ,ν) at delta: Π_i (γ^{2^i} + delta^{2^i})
@@ -322,45 +436,8 @@ fn evaluate_phi_hat_at<F: Field>(gamma: F, delta: F, nu: usize) -> F {
     acc
 }
 
-/// p̂(X) = Σ_{i=0}^{l-1} γ^i · chunk_i(X)
-fn linear_combination_of_chunks<F: Field>(chunks: &[Vec<F>], gamma: F) -> Vec<F> {
-    let max_len = chunks.iter().map(|c| c.len()).max().unwrap_or(0);
-    let mut result = vec![F::zero(); max_len];
-    let mut gamma_pow = F::one();
-    for chunk in chunks {
-        for (j, &v) in chunk.iter().enumerate() {
-            result[j] += gamma_pow * v;
-        }
-        gamma_pow *= gamma;
-    }
-    result
-}
-
-/// Fix first kappa variables of multilinear eval table at point[..kappa],
-/// returning l = 2^nu remaining evaluation values (one per assignment of
-/// the last nu variables).
-fn get_evaluation_set<F: Field>(poly_evals: &[F], point: &[F], kappa: usize) -> Vec<F> {
-    let _total_vars = point.len();
-    let sz = poly_evals.len();
-    let mut evals = poly_evals.to_vec();
-    for i in 0..kappa {
-        let step = 1 << (i + 1);
-        let half = 1 << i;
-        for j in (0..sz).step_by(step) {
-            evals[j] = (F::one() - point[i]) * evals[j] + point[i] * evals[j + half];
-        }
-    }
-    let step = 1 << kappa;
-    let total_entries = sz;
-    let mut res = Vec::with_capacity(total_entries / step);
-    for i in (0..total_entries).step_by(step) {
-        res.push(evals[i]);
-    }
-    res
-}
-
 // ═══════════════════════════════════════════════════════════════════
-// compute_t_hat — 7-term polynomial combination
+// compute_t_hat — 7-term combination (in-place allocation)
 // ═══════════════════════════════════════════════════════════════════
 
 #[allow(clippy::too_many_arguments)]
@@ -677,7 +754,6 @@ fn samaritan_open_with_transcript<E: Pairing>(
         .evaluate(point)
         .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
 
-    // Bind commitment, point, eval to transcript
     let commitment = pp.try_commit(&coeffs)?;
     transcript.append_serializable_element(b"commitment", &commitment)?;
     transcript.append_serializable_element(b"point", &point.to_vec())?;
@@ -685,13 +761,15 @@ fn samaritan_open_with_transcript<E: Pairing>(
 
     let f_hat = coeffs;
 
-    // Step 2: compute evaluation set g_i, build v_hat
-    let _t_build_v = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_build_v_hat", l, "eval-set");
+    let _t_get_eval =
+        ScopedTimer::new(BACKEND, mu, n, "samaritan_open_get_eval_set", l, "eval-set");
     let g_eval_values = get_evaluation_set(&f_hat, point, kappa);
+    drop(_t_get_eval);
+
+    let _t_build_v = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_build_v_hat", l, "build-v");
     let v_hat = g_eval_values;
     drop(_t_build_v);
 
-    // Step 3: commit v_hat
     let _t_cm_v = ScopedTimer::new(
         BACKEND,
         mu,
@@ -704,21 +782,32 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"v_hat_commit", &v_hat_commit)?;
     drop(_t_cm_v);
 
-    // Step 4: FS challenge gamma
     let gamma = transcript.get_and_append_challenge_vectors(b"gamma", 1)?[0];
 
-    // Step 5: v_gamma = v_hat(gamma)
     let v_gamma = poly_eval(&v_hat, gamma);
     transcript.append_field_element(b"v_gamma", &v_gamma)?;
 
-    // Step 6: divide f_hat into l chunks, linear combine → p_hat
-    let _t_build_p = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_build_p_hat", l, "chunks");
-    let chunks: Vec<Vec<E::ScalarField>> =
-        (0..l).map(|i| f_hat[i * m..(i + 1) * m].to_vec()).collect();
-    let p_hat = linear_combination_of_chunks(&chunks, gamma);
+    let _t_build_p = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "samaritan_open_build_p_hat",
+        l,
+        "chunks-stream",
+    );
+    let zero = E::ScalarField::zero();
+    let one = E::ScalarField::one();
+    let mut p_hat = vec![zero; m];
+    let mut gamma_pow = one;
+    for i in 0..l {
+        let chunk = &f_hat[i * m..(i + 1) * m];
+        for (j, &val) in chunk.iter().enumerate() {
+            p_hat[j] += gamma_pow * val;
+        }
+        gamma_pow *= gamma;
+    }
     drop(_t_build_p);
 
-    // Step 7: commit p_hat
     let _t_cm_p = ScopedTimer::new(
         BACKEND,
         mu,
@@ -731,36 +820,20 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"p_hat_commit", &p_hat_commit)?;
     drop(_t_cm_p);
 
-    // Step 8-9: build psi_hat_X_zy, phi_hat_X_gamma
-    let _t_psi = ScopedTimer::new(
+    let alpha = transcript.get_and_append_challenge_vectors(b"alpha", 1)?[0];
+
+    let _t_v_psi_phi = ScopedTimer::new(
         BACKEND,
         mu,
         n,
-        "samaritan_open_compute_psi_phi",
+        "samaritan_open_v_times_psi_phi",
         1,
-        "psi-phi",
+        "v-psi-phi",
     );
-    let psi_hat_zy = compute_psi_hat_prod(&point[kappa..], nu);
-    let phi_hat = compute_phi_hat(gamma, nu);
-    drop(_t_psi);
+    let v_psi_phi_combined =
+        structured_mul_v_psi_plus_alpha_phi(&v_hat, &point[kappa..], nu, gamma, alpha);
+    drop(_t_v_psi_phi);
 
-    // FS challenge alpha
-    let alpha = transcript.get_and_append_challenge_vectors(b"alpha", 1)?[0];
-
-    // v_psi_phi_combined = v_hat * (psi_zy + alpha * phi_hat)
-    let psi_plus_alpha_phi = {
-        let mut combined = vec![E::ScalarField::zero(); psi_hat_zy.len().max(phi_hat.len())];
-        for (i, &c) in psi_hat_zy.iter().enumerate() {
-            combined[i] += c;
-        }
-        for (i, &c) in phi_hat.iter().enumerate() {
-            combined[i] += alpha * c;
-        }
-        combined
-    };
-    let v_psi_phi_combined = poly_mul(&v_hat, &psi_plus_alpha_phi);
-
-    // b_hat = lowest (l-1) coeffs
     let b_hat: Vec<E::ScalarField> = v_psi_phi_combined
         .iter()
         .take(l.saturating_sub(1))
@@ -779,13 +852,10 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"b_hat_commit", &b_hat_commit)?;
     drop(_t_cm_b);
 
-    // psi_hat_X_zx = ψ̂(X; zx) for first kappa variables
-    let psi_hat_zx = compute_psi_hat_prod(&point[..kappa], kappa);
+    let _t_p_psi = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_p_times_psi", 1, "p-psi");
+    let p_psi_combined = structured_mul_p_psi(&p_hat, &point[..kappa], kappa);
+    drop(_t_p_psi);
 
-    // p_psi_combined = p_hat * psi_zx
-    let p_psi_combined = poly_mul(&p_hat, &psi_hat_zx);
-
-    // u_hat = lowest (m-1) coeffs of p_psi_combined
     let u_hat: Vec<E::ScalarField> = p_psi_combined
         .iter()
         .take(m.saturating_sub(1))
@@ -804,10 +874,8 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"u_hat_commit", &u_hat_commit)?;
     drop(_t_cm_u);
 
-    // FS challenge beta
     let beta = transcript.get_and_append_challenge_vectors(b"beta", 1)?[0];
 
-    // compute t_hat
     let _t_cthat = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_compute_t_hat", 1, "t-hat");
     let t_hat = compute_t_hat(
         &v_psi_phi_combined,
@@ -826,7 +894,6 @@ fn samaritan_open_with_transcript<E: Pairing>(
     );
     drop(_t_cthat);
 
-    // commit t_hat
     let _t_cm_t = ScopedTimer::new(
         BACKEND,
         mu,
@@ -839,7 +906,6 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"t_hat_commit", &t_hat_commit)?;
     drop(_t_cm_t);
 
-    // s_hat = t_hat shifted by (max_deg - n + 1) zeros → 1 zero prepended
     let _t_cm_s = ScopedTimer::new(
         BACKEND,
         mu,
@@ -859,10 +925,8 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"s_hat_commit", &s_hat_commit)?;
     drop(_t_cm_s);
 
-    // FS challenge delta
     let delta = transcript.get_and_append_challenge_vectors(b"delta", 1)?[0];
 
-    // compute q_hat, KZG prove q_hat(delta) = 0
     let _t_cqhat = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_compute_q_hat", 1, "q-hat");
     let psi_zy_delta = evaluate_psi_hat_at(&point[kappa..], delta);
     let phi_delta = evaluate_phi_hat_at(gamma, delta, nu);
@@ -1866,6 +1930,83 @@ mod tests {
         let r = SamaritanPCS::<E>::batch_verify(&small_vk, &comms, &pts, &proof, &mut tv);
         assert!(r.is_err(), "num_var above vk bound should return Error");
         Ok(())
+    }
+
+    // ── Structured vs dense equivalence ──
+
+    #[test]
+    fn test_structured_vs_dense_psi_phi() {
+        let mut rng = test_rng();
+        for nv in [2, 4, 6] {
+            let mu = nv;
+            let kappa = compute_kappa(mu);
+            let nu = mu - kappa;
+            let l = 1 << nu;
+            let point: Vec<Fr> = (0..mu).map(|_| Fr::rand(&mut rng)).collect();
+            let v_hat: Vec<Fr> = (0..l).map(|_| Fr::rand(&mut rng)).collect();
+            let gamma = Fr::rand(&mut rng);
+            let alpha = Fr::rand(&mut rng);
+
+            // Old: dense poly_mul
+            let old_psi = {
+                let mut acc = vec![Fr::one()];
+                for i in 0..nu {
+                    let s = 1 << i;
+                    let z = point[kappa + i];
+                    let new_len = acc.len() + s;
+                    let mut next = vec![Fr::zero(); new_len];
+                    for (j, &c) in acc.iter().enumerate() {
+                        next[j] += z * c;
+                        next[j + s] += (Fr::one() - z) * c;
+                    }
+                    acc = next;
+                }
+                acc
+            };
+            let old_phi = {
+                let mut acc = vec![Fr::one()];
+                let mut gp = gamma;
+                for i in 0..nu {
+                    let s = 1 << i;
+                    let new_len = acc.len() + s;
+                    let mut next = vec![Fr::zero(); new_len];
+                    for (j, &c) in acc.iter().enumerate() {
+                        next[j] += gp * c;
+                        next[j + s] += c;
+                    }
+                    acc = next;
+                    gp *= gp;
+                }
+                acc
+            };
+            let psi_plus_alpha_phi = {
+                let max_len = old_psi.len().max(old_phi.len());
+                let mut combined = vec![Fr::zero(); max_len];
+                for (i, &c) in old_psi.iter().enumerate() {
+                    combined[i] += c;
+                }
+                for (i, &c) in old_phi.iter().enumerate() {
+                    combined[i] += alpha * c;
+                }
+                combined
+            };
+            let old_result = poly_mul(&v_hat, &psi_plus_alpha_phi);
+
+            // New: structured
+            let new_result =
+                structured_mul_v_psi_plus_alpha_phi(&v_hat, &point[kappa..], nu, gamma, alpha);
+
+            assert_eq!(
+                old_result.len(),
+                new_result.len(),
+                "nv={nv}: length mismatch old={} new={}",
+                old_result.len(),
+                new_result.len()
+            );
+            for (i, (&o, &n)) in old_result.iter().zip(new_result.iter()).enumerate() {
+                assert_eq!(o, n, "nv={nv} index={i}: old={o:?} new={n:?}");
+            }
+        }
     }
 
     fn assert_rejects(r: Result<bool, PCSError>) {
