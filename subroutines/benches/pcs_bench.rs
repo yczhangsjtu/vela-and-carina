@@ -15,6 +15,7 @@ use subroutines::pcs::{
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
+const VERIFY_REPETITIONS: usize = 100;
 const ALL_BACKENDS: [&str; 6] = [
     "mkzg",
     "gemini",
@@ -97,29 +98,20 @@ fn bench_all() -> Result<(), PCSError> {
         "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
         "backend", "nv", "srs_gen", "trim", "commit", "prover(open)", "verify"
     );
+    println!("# verify is the mean of {VERIFY_REPETITIONS} repetitions; all other phases run once");
     println!("{}", "-".repeat(92));
 
     for &nv in &nv_list {
-        let rep = if nv <= 12 { 5 } else { 2 };
         for backend in &backends {
             match backend.as_str() {
-                "mkzg" => bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv, rep)?,
-                "gemini" => bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv, rep)?,
-                "mulcs" => {
-                    bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv, rep)?
+                "mkzg" => bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv)?,
+                "gemini" => bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv)?,
+                "mulcs" => bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv)?,
+                "symmetric" => {
+                    bench_backend::<MulcsSymmetricPCS<Bls12_381>>(&mut rng, "MulcsSymmetric", nv)?
                 },
-                "symmetric" => bench_backend::<MulcsSymmetricPCS<Bls12_381>>(
-                    &mut rng,
-                    "MulcsSymmetric",
-                    nv,
-                    rep,
-                )?,
-                "samaritan" => {
-                    bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv, rep)?
-                },
-                "zeromorph" => {
-                    bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv, rep)?
-                },
+                "samaritan" => bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv)?,
+                "zeromorph" => bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv)?,
                 _ => unreachable!("parse_backends validates values"),
             }
         }
@@ -133,7 +125,6 @@ fn bench_backend<PCS>(
     rng: &mut impl ark_std::rand::Rng,
     name: &str,
     nv: usize,
-    rep: usize,
 ) -> Result<(), PCSError>
 where
     PCS: PolynomialCommitmentScheme<
@@ -145,20 +136,16 @@ where
 {
     let srs_gen_ns = {
         let start = Instant::now();
-        for _ in 0..rep {
-            let _ = PCS::gen_srs_for_testing(rng, nv)?;
-        }
-        start.elapsed().as_nanos() / (rep as u128)
+        let _ = PCS::gen_srs_for_testing(rng, nv)?;
+        start.elapsed().as_nanos()
     };
 
     let srs = PCS::gen_srs_for_testing(rng, nv)?;
 
     let trim_ns = {
         let start = Instant::now();
-        for _ in 0..rep {
-            let _ = PCS::trim(&srs, None, Some(nv))?;
-        }
-        start.elapsed().as_nanos() / (rep as u128)
+        let _ = PCS::trim(&srs, None, Some(nv))?;
+        start.elapsed().as_nanos()
     };
 
     let (ck, vk) = PCS::trim(&srs, None, Some(nv))?;
@@ -168,18 +155,14 @@ where
 
     let commit_ns = {
         let start = Instant::now();
-        for _ in 0..rep {
-            let _ = PCS::commit(&ck, &poly)?;
-        }
-        start.elapsed().as_nanos() / (rep as u128)
+        let _ = PCS::commit(&ck, &poly)?;
+        start.elapsed().as_nanos()
     };
 
     let prover_ns = {
         let start = Instant::now();
-        for _ in 0..rep {
-            let _ = PCS::open(&ck, &poly, &point)?;
-        }
-        start.elapsed().as_nanos() / (rep as u128)
+        let _ = PCS::open(&ck, &poly, &point)?;
+        start.elapsed().as_nanos()
     };
 
     let (proof, value) = PCS::open(&ck, &poly, &point)?;
@@ -187,10 +170,10 @@ where
 
     let verify_ns = {
         let start = Instant::now();
-        for _ in 0..rep {
+        for _ in 0..VERIFY_REPETITIONS {
             assert!(PCS::verify(&vk, &com, &point, &value, &proof)?);
         }
-        start.elapsed().as_nanos() / (rep as u128)
+        start.elapsed().as_nanos() / (VERIFY_REPETITIONS as u128)
     };
 
     println!(
