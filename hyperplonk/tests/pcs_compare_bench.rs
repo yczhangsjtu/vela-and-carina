@@ -1,15 +1,23 @@
-//! HyperPlonk PCS comparison benchmark: mKZG vs Mulcs vs MulcsSymmetric vs
-//! Zeromorph vs Samaritan
+//! HyperPlonk PCS comparison benchmark.
+//!
+//! Backends: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini
+//! Gemini uses naive separate-KZG openings (NOT Shplonk-batched).
 //!
 //! **These tests are `#[ignore]` and do not run in default `cargo test`.**
 //!
-//! Run with:
-//!   NV_RANGE=4,6 cargo test -p hyperplonk --release
-//! bench_hyperplonk_pcs_compare -- --ignored --nocapture   NV_RANGE=8,10,12
-//! cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare -- --ignored
-//! --nocapture
+//! Env vars:
+//!   NV_RANGE=4,6        (default: 4,5,6)
+//!   BACKEND=gemini       (default: all)
+//!   BACKEND=all          (runs all 6 backends)
+//! Supported BACKEND values: mKZG, Mulcs, MulcsSymmetric, Zeromorph,
+//!                            Samaritan, Gemini, all
 //!
-//! Parameters: vanilla Plonk gate, BLS12-381. Set NV_RANGE env var to override.
+//! Examples:
+//!   NV_RANGE=4 BACKEND=gemini cargo test -p hyperplonk --release \
+//!     --test pcs_compare_bench -- --ignored --nocapture
+//!
+//!   NV_RANGE=4,6 BACKEND=all cargo test -p hyperplonk --release \
+//!     --test pcs_compare_bench -- --ignored --nocapture
 
 #[cfg(test)]
 mod tests {
@@ -22,7 +30,10 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{
+                GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS,
+                ZeromorphPCS,
+            },
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -38,6 +49,35 @@ mod tests {
                 .collect()
         } else {
             vec![4, 5, 6]
+        }
+    }
+
+    const ALL_BACKENDS: &[&str] = &[
+        "mKZG",
+        "Mulcs",
+        "MulcsSymmetric",
+        "Zeromorph",
+        "Samaritan",
+        "Gemini",
+    ];
+
+    fn selected_backends() -> Vec<&'static str> {
+        let raw = match env::var("BACKEND") {
+            Ok(v) => v,
+            Err(_) => return ALL_BACKENDS.to_vec(),
+        };
+        let key = raw.trim().to_lowercase();
+        match key.as_str() {
+            "all" => ALL_BACKENDS.to_vec(),
+            "mkzg" => vec!["mKZG"],
+            "mulcs" => vec!["Mulcs"],
+            "mulcssymmetric" | "symmetric" | "mulcs-symmetric" => vec!["MulcsSymmetric"],
+            "zeromorph" => vec!["Zeromorph"],
+            "samaritan" => vec!["Samaritan"],
+            "gemini" => vec!["Gemini"],
+            _ => panic!(
+                "unknown BACKEND '{raw}'. Supported: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini, all"
+            ),
         }
     }
 
@@ -77,15 +117,11 @@ mod tests {
                     &proof,
                 )?;
                 let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
+                assert!(ok);
                 println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
-                println!(
-                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
-                    if ok { "pass" } else { "FAIL" }
-                );
-                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
             },
             "Mulcs" => {
                 let t0 = Instant::now();
@@ -114,15 +150,11 @@ mod tests {
                     &proof,
                 )?;
                 let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
+                assert!(ok);
                 println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
-                println!(
-                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
-                    if ok { "pass" } else { "FAIL" }
-                );
-                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
             },
             "Zeromorph" => {
                 let t0 = Instant::now();
@@ -152,15 +184,11 @@ mod tests {
                     &proof,
                 )?;
                 let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
+                assert!(ok);
                 println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
-                println!(
-                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
-                    if ok { "pass" } else { "FAIL" }
-                );
-                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
             },
             "MulcsSymmetric" => {
                 let t0 = Instant::now();
@@ -190,15 +218,11 @@ mod tests {
                     &proof,
                 )?;
                 let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
+                assert!(ok);
                 println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
-                println!(
-                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
-                    if ok { "pass" } else { "FAIL" }
-                );
-                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
             },
             "Samaritan" => {
                 let t0 = Instant::now();
@@ -228,15 +252,44 @@ mod tests {
                     &proof,
                 )?;
                 let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
-
+                assert!(ok);
                 println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
                 println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
-                println!(
-                    "top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,{}",
-                    if ok { "pass" } else { "FAIL" }
-                );
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
+            },
+            "Gemini" => {
+                let t0 = Instant::now();
+                let srs = GeminiPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, GeminiPCS<E>>>::preprocess(
+                    &circuit.index,
+                    &srs,
+                )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, GeminiPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, GeminiPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
                 assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
             },
             _ => panic!("unknown backend: {backend}"),
         }
@@ -244,16 +297,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "benchmark: run with NV_RANGE=4,6 cargo test -p hyperplonk --release bench_hyperplonk_pcs_compare -- --ignored --nocapture"]
+    #[ignore = "benchmark: set NV_RANGE and BACKEND, then run with --release -- --ignored --nocapture"]
     fn bench_hyperplonk_pcs_compare() -> Result<(), HyperPlonkErrors> {
         let nvs = default_nv_range();
+        let backends = selected_backends();
         println!("source,backend,nv,N,repeat,phase,elapsed_ms,count,notes");
         for &nv in &nvs {
-            bench_backend("mKZG", nv)?;
-            bench_backend("Mulcs", nv)?;
-            bench_backend("MulcsSymmetric", nv)?;
-            bench_backend("Zeromorph", nv)?;
-            bench_backend("Samaritan", nv)?;
+            for b in &backends {
+                bench_backend(b, nv)?;
+            }
         }
         Ok(())
     }

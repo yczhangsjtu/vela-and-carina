@@ -3,6 +3,11 @@
 //! Converts multilinear polynomial evaluations to univariate coefficient form,
 //! then commits using KZG G1 MSM. The opening protocol uses the Gemini
 //! transformation to reduce multilinear openings to univariate KZG proofs.
+//!
+//! The single-open protocol uses Shplonk batching to achieve O(1) KZG proof
+//! elements. Fold claims are accumulated into a single batched quotient whose
+//! evaluation at a random point z must be zero; a single KZG opening proof
+//! witnesses that condition.
 
 pub(crate) mod srs;
 
@@ -44,8 +49,21 @@ pub struct GeminiProof<E: Pairing> {
     pub fold_comms: Vec<E::G1Affine>,
     pub fold_evals: Vec<(E::ScalarField, E::ScalarField)>,
     pub final_coeffs: (E::ScalarField, E::ScalarField),
-    pub all_kzg_proofs: Vec<E::G1Affine>,
+    pub shplonk_q_commit: E::G1Affine,
+    pub kzg_witness: E::G1Affine,
     pub mu: usize,
+}
+
+impl<E: Pairing> GeminiProof<E> {
+    fn commitment_at_step(&self, commitment: &E::G1Affine, i: usize, mu: usize) -> E::G1Affine {
+        if i == 0 {
+            *commitment
+        } else if i < mu {
+            self.fold_comms[i - 1]
+        } else {
+            *commitment
+        }
+    }
 }
 
 pub struct GeminiPCS<E: Pairing> {
@@ -189,31 +207,42 @@ fn fold_polynomial<F: Field>(coeffs: &[F], u: F) -> Vec<F> {
     result
 }
 
-fn kzg_prove_coeffs<E: Pairing>(
-    pp: &GeminiProverParam<E>,
-    coeffs: &[E::ScalarField],
-    point: E::ScalarField,
-) -> Result<(E::ScalarField, E::G1Affine), PCSError> {
-    let eval = poly_eval(coeffs, point);
-    let mut div = vec![E::ScalarField::zero(); coeffs.len()];
+fn kzg_quotient<F: Field>(coeffs: &[F], point: F, value: F) -> Vec<F> {
+    if coeffs.len() <= 1 {
+        return vec![];
+    }
+    let n = coeffs.len();
+    let mut div = vec![F::zero(); n];
     for (i, &c) in coeffs.iter().enumerate() {
         div[i] = c;
     }
-    div[0] -= eval;
-    let n = div.len();
-    let mut q = vec![E::ScalarField::zero(); n - 1];
-    let mut carry = E::ScalarField::zero();
+    div[0] -= value;
+    let mut q = vec![F::zero(); n - 1];
+    let mut carry = F::zero();
     for i in (1..n).rev() {
         let term = div[i] + carry;
         q[i - 1] = term;
         carry = term * point;
     }
-    let proof = pp.try_commit(&q)?;
-    Ok((eval, proof))
+    q
+}
+
+fn validate_z<F: Field>(z: F, points: &[F]) -> Result<(), PCSError> {
+    if z.is_zero() {
+        return Err(PCSError::InvalidProof("Shplonk: z is zero".to_string()));
+    }
+    for &p in points {
+        if z == p || z == -p {
+            return Err(PCSError::InvalidProof(format!(
+                "Shplonk: z collides with opening point {p:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Transcript-aware single opening
+// Transcript-aware single opening (Shplonk-batched)
 // ═══════════════════════════════════════════════════════════════════
 
 fn gemini_open_with_transcript<E: Pairing>(
@@ -254,7 +283,7 @@ fn gemini_open_with_transcript<E: Pairing>(
     );
     let mut a_polys: Vec<Vec<E::ScalarField>> = Vec::with_capacity(mu);
     a_polys.push(f_hat.clone());
-    for i in 0..mu - 1 {
+    for i in 0..mu.saturating_sub(1) {
         let next = fold_polynomial(&a_polys[i], point[i]);
         a_polys.push(next);
     }
@@ -265,10 +294,10 @@ fn gemini_open_with_transcript<E: Pairing>(
         mu,
         n,
         "gemini_open_commit_folds",
-        a_polys.len() - 1,
+        a_polys.len().saturating_sub(1),
         "KZG-commit-fold",
     );
-    let mut fold_comms: Vec<E::G1Affine> = Vec::with_capacity(mu - 1);
+    let mut fold_comms: Vec<E::G1Affine> = Vec::with_capacity(mu.saturating_sub(1));
     for a in a_polys.iter().skip(1) {
         fold_comms.push(pp.try_commit(a)?);
     }
@@ -280,68 +309,204 @@ fn gemini_open_with_transcript<E: Pairing>(
 
     let r = transcript.get_and_append_challenge_vectors(b"r", 1)?[0];
 
-    let _t_evals = ScopedTimer::new(
+    let _t_claims = ScopedTimer::new(
         BACKEND,
         mu,
         n,
-        "gemini_open_compute_evals",
-        a_polys.len(),
+        "gemini_open_build_shplonk_claims",
+        mu,
         "eval-rounds",
     );
-    let mut fold_evals: Vec<(E::ScalarField, E::ScalarField)> = Vec::with_capacity(mu - 1);
+    let mut fold_evals: Vec<(E::ScalarField, E::ScalarField)> =
+        Vec::with_capacity(mu.saturating_sub(1));
     let mut r_pow = r;
-    for i in 0..mu - 1 {
+    for i in 0..mu.saturating_sub(1) {
         let a_i_r = poly_eval(&a_polys[i], r_pow);
         let a_i_neg_r = poly_eval(&a_polys[i], -r_pow);
         fold_evals.push((a_i_r, a_i_neg_r));
         r_pow = r_pow * r_pow;
     }
-    let c0 = a_polys[mu - 1][0];
-    let c1 = a_polys[mu - 1][1];
+    let c0 = a_polys[mu.saturating_sub(1)][0];
+    let c1 = a_polys[mu.saturating_sub(1)][1];
     let one = E::ScalarField::one();
-    let computed_eval = (one - point[mu - 1]) * c0 + point[mu - 1] * c1;
+    let computed_eval = (one - point[mu.saturating_sub(1)]) * c0 + point[mu.saturating_sub(1)] * c1;
     if computed_eval != eval {
         return Err(PCSError::InvalidProver(
             "fold check failed: eval mismatch".to_string(),
         ));
     }
-    drop(_t_evals);
+    drop(_t_claims);
 
-    let _t_kzg = ScopedTimer::new(
+    let num_folds = mu.saturating_sub(1);
+    for i in 0..num_folds {
+        transcript.append_field_element(b"Gemini:a_i", &fold_evals[i].1)?;
+    }
+
+    let nu = transcript.get_and_append_challenge_vectors(b"Shplonk:nu", 1)?[0];
+
+    let _t_batch_q = ScopedTimer::new(
         BACKEND,
         mu,
         n,
-        "gemini_open_kzg_proofs",
-        2 * (mu - 1) + 2,
-        "KZG-proofs",
+        "gemini_open_compute_batched_quotient",
+        1,
+        "batched-quotient",
     );
-    let mut all_kzg_proofs: Vec<E::G1Affine> = Vec::with_capacity(2 * (mu - 1) + 2);
+    let mut batched_q = vec![E::ScalarField::zero(); n];
+    let mut nu_pow = E::ScalarField::one();
+
     let mut r_pow = r;
-    for i in 0..mu - 1 {
-        let (_, pi_r) = kzg_prove_coeffs(pp, &a_polys[i], r_pow)?;
-        all_kzg_proofs.push(pi_r);
-        let (_, pi_neg_r) = kzg_prove_coeffs(pp, &a_polys[i], -r_pow)?;
-        all_kzg_proofs.push(pi_neg_r);
+    for i in 0..num_folds {
+        let q_pos = kzg_quotient(&a_polys[i], r_pow, fold_evals[i].0);
+        for (j, &qj) in q_pos.iter().enumerate() {
+            batched_q[j] += nu_pow * qj;
+        }
+        nu_pow *= nu;
+
+        let q_neg = kzg_quotient(&a_polys[i], -r_pow, fold_evals[i].1);
+        for (j, &qj) in q_neg.iter().enumerate() {
+            batched_q[j] += nu_pow * qj;
+        }
+        nu_pow *= nu;
+
         r_pow = r_pow * r_pow;
     }
+
     let zero = E::ScalarField::zero();
-    let (c0_val, pi_c0) = kzg_prove_coeffs(pp, &a_polys[mu - 1], zero)?;
-    let (c0_plus_c1, pi_c1) = kzg_prove_coeffs(pp, &a_polys[mu - 1], one)?;
-    if c0_val != c0 {
-        return Err(PCSError::InvalidProver("c0 KZG eval mismatch".to_string()));
+    let q_c0 = kzg_quotient(&a_polys[mu.saturating_sub(1)], zero, c0);
+    for (j, &qj) in q_c0.iter().enumerate() {
+        batched_q[j] += nu_pow * qj;
     }
-    if c0_plus_c1 != c0 + c1 {
-        return Err(PCSError::InvalidProver("c1 KZG eval mismatch".to_string()));
+    nu_pow *= nu;
+
+    let q_c1 = kzg_quotient(&a_polys[mu.saturating_sub(1)], one, c0 + c1);
+    for (j, &qj) in q_c1.iter().enumerate() {
+        batched_q[j] += nu_pow * qj;
     }
-    all_kzg_proofs.push(pi_c0);
-    all_kzg_proofs.push(pi_c1);
-    drop(_t_kzg);
+    drop(_t_batch_q);
+
+    let _t_cm_q = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "gemini_open_commit_batched_quotient",
+        1,
+        "KZG-commit-Q",
+    );
+    let shplonk_q_commit = pp.try_commit(&batched_q)?;
+    transcript.append_serializable_element(b"Shplonk:Q", &shplonk_q_commit)?;
+    drop(_t_cm_q);
+
+    let z = transcript.get_and_append_challenge_vectors(b"Shplonk:z", 1)?[0];
+    let z_points: Vec<E::ScalarField> = {
+        let mut pts = Vec::with_capacity(2 * num_folds + 2);
+        let mut rp = r;
+        for _ in 0..num_folds {
+            pts.push(rp);
+            rp = rp * rp;
+        }
+        pts
+    };
+    validate_z(z, &z_points)?;
+    if z == E::ScalarField::zero() || z == E::ScalarField::one() {
+        return Err(PCSError::InvalidProver(format!(
+            "Shplonk: z={z:?} collides with final_open points 0 or 1"
+        )));
+    }
+
+    let _t_partial = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "gemini_open_compute_partial_eval",
+        1,
+        "G-partial-eval",
+    );
+    let mut g_coeffs = batched_q.clone();
+    g_coeffs.resize(n, E::ScalarField::zero());
+    let mut nu_pow = E::ScalarField::one();
+    let mut r_pow = r;
+
+    for i in 0..num_folds {
+        {
+            let denom = z - r_pow;
+            let inv = denom
+                .inverse()
+                .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z - r)".into()))?;
+            let scale = nu_pow * inv;
+            for (j, &cj) in a_polys[i].iter().enumerate() {
+                g_coeffs[j] -= scale * cj;
+            }
+            g_coeffs[0] += scale * fold_evals[i].0;
+        }
+        nu_pow *= nu;
+
+        {
+            let denom = z + r_pow;
+            let inv = denom
+                .inverse()
+                .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z + r)".into()))?;
+            let scale = nu_pow * inv;
+            for (j, &cj) in a_polys[i].iter().enumerate() {
+                g_coeffs[j] -= scale * cj;
+            }
+            g_coeffs[0] += scale * fold_evals[i].1;
+        }
+        nu_pow *= nu;
+
+        r_pow = r_pow * r_pow;
+    }
+
+    {
+        let inv_z = z
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProver("Shplonk: z inverse failed".into()))?;
+        let scale = nu_pow * inv_z;
+        for (j, &cj) in a_polys[mu.saturating_sub(1)].iter().enumerate() {
+            g_coeffs[j] -= scale * cj;
+        }
+        g_coeffs[0] += scale * c0;
+    }
+    nu_pow *= nu;
+
+    {
+        let denom = z - E::ScalarField::one();
+        let inv = denom
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z-1)".into()))?;
+        let scale = nu_pow * inv;
+        for (j, &cj) in a_polys[mu.saturating_sub(1)].iter().enumerate() {
+            g_coeffs[j] -= scale * cj;
+        }
+        g_coeffs[0] += scale * (c0 + c1);
+    }
+    drop(_t_partial);
+
+    let g_z = poly_eval(&g_coeffs, z);
+    if g_z != E::ScalarField::zero() {
+        return Err(PCSError::InvalidProver(format!(
+            "Shplonk: G(z)={g_z:?} != 0"
+        )));
+    }
+
+    let _t_witness = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "gemini_open_final_kzg_witness",
+        1,
+        "KZG-commit-witness",
+    );
+    let witness_coeffs = kzg_quotient(&g_coeffs, z, E::ScalarField::zero());
+    let kzg_witness = pp.try_commit(&witness_coeffs)?;
+    drop(_t_witness);
 
     let proof = GeminiProof {
         fold_comms,
         fold_evals,
         final_coeffs: (c0, c1),
-        all_kzg_proofs,
+        shplonk_q_commit,
+        kzg_witness,
         mu,
     };
     drop(_t_total);
@@ -349,7 +514,7 @@ fn gemini_open_with_transcript<E: Pairing>(
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Transcript-aware single verification
+// Transcript-aware single verification (Shplonk-batched)
 // ═══════════════════════════════════════════════════════════════════
 
 fn gemini_verify_with_transcript<E: Pairing>(
@@ -387,6 +552,22 @@ fn gemini_verify_with_transcript<E: Pairing>(
 
     let _t_total = ScopedTimer::new(BACKEND, mu, n, "gemini_verify_total", 1, "total");
 
+    let num_folds = mu.saturating_sub(1);
+    if proof.fold_comms.len() != num_folds {
+        return Err(PCSError::InvalidProof(format!(
+            "verify: fold_comms length {} != expected {}",
+            proof.fold_comms.len(),
+            num_folds
+        )));
+    }
+    if proof.fold_evals.len() != num_folds {
+        return Err(PCSError::InvalidProof(format!(
+            "verify: fold_evals length {} != expected {}",
+            proof.fold_evals.len(),
+            num_folds
+        )));
+    }
+
     transcript.append_serializable_element(b"commitment", &commitment.0)?;
     transcript.append_serializable_element(b"point", &point.to_vec())?;
     transcript.append_field_element(b"eval", value)?;
@@ -397,38 +578,20 @@ fn gemini_verify_with_transcript<E: Pairing>(
 
     let r = transcript.get_and_append_challenge_vectors(b"r", 1)?[0];
 
-    if proof.fold_evals.len() != mu - 1 {
-        return Err(PCSError::InvalidProof(format!(
-            "verify: fold_evals length {} != expected {}",
-            proof.fold_evals.len(),
-            mu - 1
-        )));
-    }
-
-    if proof.all_kzg_proofs.len() != 2 * (mu - 1) + 2 {
-        return Err(PCSError::InvalidProof(format!(
-            "verify: kzg proofs length {} != expected {}",
-            proof.all_kzg_proofs.len(),
-            2 * (mu - 1) + 2
-        )));
-    }
-
     let _t_fold_check = ScopedTimer::new(
         BACKEND,
         mu,
         n,
         "gemini_verify_fold_checks",
-        mu - 1,
+        mu.saturating_sub(1),
         "fold-equations",
     );
     let mut r_pow = r;
-    for i in 0..mu - 1 {
+    for i in 0..num_folds {
         let (a_i_r, a_i_neg_r) = proof.fold_evals[i];
-        let a_next_r_sq = if i + 1 < mu - 1 {
-            // A_{i+1}(r_{i+1}) = A_{i+1}(r_i^2) from the next fold-eval
+        let a_next_r_sq = if i + 1 < num_folds {
             proof.fold_evals[i + 1].0
         } else {
-            // Last round: compute A_{mu-1}(r_{mu-2}^2) from coefficients
             let (c0, c1) = proof.final_coeffs;
             let r_sq = r_pow * r_pow;
             c0 + c1 * r_sq
@@ -445,68 +608,123 @@ fn gemini_verify_with_transcript<E: Pairing>(
     }
     drop(_t_fold_check);
 
-    let _t_kzg = ScopedTimer::new(
-        BACKEND,
-        mu,
-        n,
-        "gemini_verify_kzg_checks",
-        proof.all_kzg_proofs.len(),
-        "pairings",
-    );
-
-    let mut r_pow = r;
-    for i in 0..mu - 1 {
-        let pi_offset = 2 * i;
-
-        let (a_i_r, a_i_neg_r) = proof.fold_evals[i];
-
-        let com_i = if i == 0 {
-            commitment.0
-        } else {
-            proof.fold_comms[i - 1]
-        };
-
-        let pi_r_proof = proof.all_kzg_proofs[pi_offset];
-        let pi_neg_r_proof = proof.all_kzg_proofs[pi_offset + 1];
-
-        if !kzg_verify_pairing(vp, &com_i, r_pow, a_i_r, &pi_r_proof)? {
-            return Ok(false);
-        }
-        if !kzg_verify_pairing(vp, &com_i, -r_pow, a_i_neg_r, &pi_neg_r_proof)? {
-            return Ok(false);
-        }
-
-        r_pow = r_pow * r_pow;
-    }
-
     let (c0, c1) = proof.final_coeffs;
-    let expected_eval = (E::ScalarField::one() - point[mu - 1]) * c0 + point[mu - 1] * c1;
+    let one = E::ScalarField::one();
+    let expected_eval = (one - point[mu.saturating_sub(1)]) * c0 + point[mu.saturating_sub(1)] * c1;
     if expected_eval != *value {
         return Ok(false);
     }
 
-    let final_com = if mu == 1 {
+    for i in 0..num_folds {
+        transcript.append_field_element(b"Gemini:a_i", &proof.fold_evals[i].1)?;
+    }
+
+    let nu = transcript.get_and_append_challenge_vectors(b"Shplonk:nu", 1)?[0];
+    transcript.append_serializable_element(b"Shplonk:Q", &proof.shplonk_q_commit)?;
+    let z = transcript.get_and_append_challenge_vectors(b"Shplonk:z", 1)?[0];
+
+    let z_points: Vec<E::ScalarField> = {
+        let mut pts = Vec::with_capacity(2 * num_folds + 2);
+        let mut rp = r;
+        for _ in 0..num_folds {
+            pts.push(rp);
+            rp = rp * rp;
+        }
+        pts
+    };
+    validate_z(z, &z_points)?;
+    if z.is_zero() || z == one {
+        return Err(PCSError::InvalidProof(format!(
+            "Shplonk verify: z={z:?} collides with final_open point 0 or 1"
+        )));
+    }
+
+    let _t_msm = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "gemini_verify_shplonk_msm",
+        1,
+        "shplonk-msm",
+    );
+
+    let mut bases: Vec<E::G1Affine> = vec![proof.shplonk_q_commit];
+    let mut scalars: Vec<E::ScalarField> = vec![E::ScalarField::one()];
+    let mut identity_scalar = E::ScalarField::zero();
+
+    let mut nu_pow = E::ScalarField::one();
+    let mut r_pow = r;
+
+    for i in 0..num_folds {
+        let a_i_commit = proof.commitment_at_step(&commitment.0, i, mu);
+
+        {
+            let denom = z - r_pow;
+            let inv = denom.inverse().ok_or_else(|| {
+                PCSError::InvalidProof("Shplonk verify: (z - r) inverse failed".into())
+            })?;
+            let scale = nu_pow * inv;
+            bases.push(a_i_commit);
+            scalars.push(-scale);
+            identity_scalar += scale * proof.fold_evals[i].0;
+        }
+        nu_pow *= nu;
+
+        {
+            let denom = z + r_pow;
+            let inv = denom.inverse().ok_or_else(|| {
+                PCSError::InvalidProof("Shplonk verify: (z + r) inverse failed".into())
+            })?;
+            let scale = nu_pow * inv;
+            bases.push(a_i_commit);
+            scalars.push(-scale);
+            identity_scalar += scale * proof.fold_evals[i].1;
+        }
+        nu_pow *= nu;
+
+        r_pow = r_pow * r_pow;
+    }
+
+    let a_last_commit = if mu == 1 {
         commitment.0
     } else {
         proof.fold_comms[mu - 2]
     };
 
-    let zero = E::ScalarField::zero();
-    let one = E::ScalarField::one();
-    let pi_c0 = proof.all_kzg_proofs[2 * (mu - 1)];
-    let pi_c1 = proof.all_kzg_proofs[2 * (mu - 1) + 1];
-
-    if !kzg_verify_pairing(vp, &final_com, zero, c0, &pi_c0)? {
-        return Ok(false);
+    {
+        let inv_z = z
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProof("Shplonk verify: z inverse failed".into()))?;
+        let scale = nu_pow * inv_z;
+        bases.push(a_last_commit);
+        scalars.push(-scale);
+        identity_scalar += scale * c0;
     }
-    if !kzg_verify_pairing(vp, &final_com, one, c0 + c1, &pi_c1)? {
-        return Ok(false);
+    nu_pow *= nu;
+
+    {
+        let denom = z - one;
+        let inv = denom
+            .inverse()
+            .ok_or_else(|| PCSError::InvalidProof("Shplonk verify: (z-1) inverse failed".into()))?;
+        let scale = nu_pow * inv;
+        bases.push(a_last_commit);
+        scalars.push(-scale);
+        identity_scalar += scale * (c0 + c1);
     }
 
-    drop(_t_kzg);
+    bases.push(vp.g);
+    scalars.push(identity_scalar);
+
+    let g_commit = E::G1::msm_unchecked(&bases, &scalars).into_affine();
+    drop(_t_msm);
+
+    let _t_pairing = ScopedTimer::new(BACKEND, mu, n, "gemini_verify_kzg_pairing", 1, "1-pairing");
+    let valid = kzg_verify_pairing(vp, &g_commit, z, E::ScalarField::zero(), &proof.kzg_witness)?;
+    drop(_t_pairing);
     drop(_t_total);
 
-    Ok(true)
+    Ok(valid)
 }
 
 fn kzg_verify_pairing<E: Pairing>(
@@ -887,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_reject_tampered_kzg_proof() -> Result<(), PCSError> {
+    fn test_gemini_reject_tampered_shplonk_q_commit() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let nv = 4;
         let (ck, vk) = setup(nv);
@@ -895,8 +1113,22 @@ mod tests {
         let pt = rpt(nv, &mut rng);
         let com = GeminiPCS::<E>::commit(&ck, &p)?;
         let (mut proof, val) = GeminiPCS::<E>::open(&ck, &p, &pt)?;
-        proof.all_kzg_proofs[0] =
-            (proof.all_kzg_proofs[0].into_group() * Fr::from(3u64)).into_affine();
+        proof.shplonk_q_commit =
+            (proof.shplonk_q_commit.into_group() * Fr::from(3u64)).into_affine();
+        assert!(!GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gemini_reject_tampered_kzg_witness() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let pt = rpt(nv, &mut rng);
+        let com = GeminiPCS::<E>::commit(&ck, &p)?;
+        let (mut proof, val) = GeminiPCS::<E>::open(&ck, &p, &pt)?;
+        proof.kzg_witness = (proof.kzg_witness.into_group() * Fr::from(5u64)).into_affine();
         assert!(!GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
         Ok(())
     }
@@ -1288,7 +1520,7 @@ mod tests {
         Ok(())
     }
 
-    // ── Minimal KZG proof count ──
+    // ── Shplonk-batched proof element count ──
 
     #[test]
     fn test_gemini_proof_kzg_count_is_minimal() {
@@ -1300,11 +1532,11 @@ mod tests {
             let _com = GeminiPCS::<E>::commit(&ck, &p).unwrap();
             let (proof, _val) = GeminiPCS::<E>::open(&ck, &p, &pt).unwrap();
             assert_eq!(
-                proof.all_kzg_proofs.len(),
-                2 * (nv - 1) + 2,
-                "nv={nv}: expected {} KZG proofs, got {}",
-                2 * (nv - 1) + 2,
-                proof.all_kzg_proofs.len()
+                proof.fold_comms.len(),
+                nv - 1,
+                "nv={nv}: expected {} fold comms, got {}",
+                nv - 1,
+                proof.fold_comms.len()
             );
             assert!(GeminiPCS::<E>::verify(&vk, &_com, &pt, &_val, &proof).unwrap());
         }
@@ -1348,6 +1580,53 @@ mod tests {
             "tampered final coeff should reject"
         );
         Ok(())
+    }
+
+    // ── Malformed fold_comms length guards ──
+
+    #[test]
+    fn test_gemini_verify_rejects_short_fold_comms_without_panic() {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let pt = rpt(nv, &mut rng);
+        let com = GeminiPCS::<E>::commit(&ck, &p).unwrap();
+        let (mut proof, val) = GeminiPCS::<E>::open(&ck, &p, &pt).unwrap();
+        proof.fold_comms.pop();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "short fold_comms should fail"
+            ),
+            Err(_) => panic!("short fold_comms should not panic"),
+        }
+    }
+
+    #[test]
+    fn test_gemini_verify_rejects_long_fold_comms_without_panic() {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, vk) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let pt = rpt(nv, &mut rng);
+        let com = GeminiPCS::<E>::commit(&ck, &p).unwrap();
+        let (mut proof, val) = GeminiPCS::<E>::open(&ck, &p, &pt).unwrap();
+        let extra = proof.fold_comms[0];
+        proof.fold_comms.push(extra);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)
+        }));
+        match r {
+            Ok(verdict) => assert!(
+                verdict.is_err() || !verdict.unwrap(),
+                "long fold_comms should fail"
+            ),
+            Err(_) => panic!("long fold_comms should not panic"),
+        }
     }
 
     fn assert_rejects(r: Result<bool, PCSError>) {

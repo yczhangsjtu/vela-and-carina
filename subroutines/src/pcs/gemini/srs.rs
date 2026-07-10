@@ -93,6 +93,17 @@ impl<E: Pairing> StructuredReferenceString<E> for GeminiUniversalParams<E> {
         &self,
         supported_size: usize,
     ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+        if supported_size == 0 {
+            return Err(PCSError::InvalidParameters(
+                "trim: supported_size must be positive".to_string(),
+            ));
+        }
+        if !supported_size.is_power_of_two() {
+            return Err(PCSError::InvalidParameters(format!(
+                "trim: supported_size {} must be a power of two",
+                supported_size
+            )));
+        }
         if supported_size > self.prover_param.max_degree {
             return Err(PCSError::InvalidParameters(format!(
                 "requested degree {} exceeds SRS max {}",
@@ -239,5 +250,28 @@ mod tests {
             Ok(verdict) => assert!(verdict.is_err(), "huge num_vars should return Err"),
             Err(_) => panic!("gen_srs_for_testing should not panic on huge num_vars"),
         }
+    }
+
+    #[test]
+    fn test_gemini_srs_trim_rejects_non_power_of_two() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let srs = GeminiUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, 4)?;
+        assert!(
+            srs.trim(3).is_err(),
+            "trim(3) should reject non-power-of-two"
+        );
+        assert!(
+            srs.trim(6).is_err(),
+            "trim(6) should reject non-power-of-two"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gemini_srs_trim_rejects_zero() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let srs = GeminiUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, 4)?;
+        assert!(srs.trim(0).is_err(), "trim(0) should reject zero");
+        Ok(())
     }
 }
