@@ -5,7 +5,7 @@ use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::UniformRand;
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension};
 use ark_std::{sync::Arc, test_rng};
-use std::time::Instant;
+use std::{env, time::Instant};
 use subroutines::pcs::{
     prelude::{
         GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, SamaritanPCS,
@@ -15,6 +15,14 @@ use subroutines::pcs::{
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
+const ALL_BACKENDS: [&str; 6] = [
+    "mkzg",
+    "gemini",
+    "mulcs",
+    "symmetric",
+    "samaritan",
+    "zeromorph",
+];
 
 fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
     match std::env::var("PCS_BENCH_NV_RANGE") {
@@ -46,6 +54,37 @@ fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
     }
 }
 
+fn parse_backends() -> Result<Vec<String>, PCSError> {
+    let raw = match env::var("PCS_BENCH_BACKEND") {
+        Ok(raw) => raw,
+        Err(env::VarError::NotPresent) => {
+            return Ok(ALL_BACKENDS
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect())
+        },
+        Err(err) => {
+            return Err(PCSError::InvalidParameters(format!(
+                "PCS_BENCH_BACKEND env error: {err}"
+            )))
+        },
+    };
+    let selected = raw.trim().to_ascii_lowercase();
+    if selected == "all" {
+        return Ok(ALL_BACKENDS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect());
+    }
+    if ALL_BACKENDS.contains(&selected.as_str()) {
+        Ok(vec![selected])
+    } else {
+        Err(PCSError::InvalidParameters(format!(
+            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, symmetric, samaritan, zeromorph, or all"
+        )))
+    }
+}
+
 fn main() -> Result<(), PCSError> {
     bench_all()
 }
@@ -53,6 +92,7 @@ fn main() -> Result<(), PCSError> {
 fn bench_all() -> Result<(), PCSError> {
     let mut rng = test_rng();
     let nv_list = parse_nv_list()?;
+    let backends = parse_backends()?;
     println!(
         "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
         "backend", "nv", "srs_gen", "trim", "commit", "prover(open)", "verify"
@@ -61,13 +101,28 @@ fn bench_all() -> Result<(), PCSError> {
 
     for &nv in &nv_list {
         let rep = if nv <= 12 { 5 } else { 2 };
-
-        bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv, rep)?;
-        bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv, rep)?;
-        bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv, rep)?;
-        bench_backend::<MulcsSymmetricPCS<Bls12_381>>(&mut rng, "MulcsSymmetric", nv, rep)?;
-        bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv, rep)?;
-        bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv, rep)?;
+        for backend in &backends {
+            match backend.as_str() {
+                "mkzg" => bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv, rep)?,
+                "gemini" => bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv, rep)?,
+                "mulcs" => {
+                    bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv, rep)?
+                },
+                "symmetric" => bench_backend::<MulcsSymmetricPCS<Bls12_381>>(
+                    &mut rng,
+                    "MulcsSymmetric",
+                    nv,
+                    rep,
+                )?,
+                "samaritan" => {
+                    bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv, rep)?
+                },
+                "zeromorph" => {
+                    bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv, rep)?
+                },
+                _ => unreachable!("parse_backends validates values"),
+            }
+        }
         println!();
     }
 

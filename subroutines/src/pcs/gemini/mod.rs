@@ -54,18 +54,6 @@ pub struct GeminiProof<E: Pairing> {
     pub mu: usize,
 }
 
-impl<E: Pairing> GeminiProof<E> {
-    fn commitment_at_step(&self, commitment: &E::G1Affine, i: usize, mu: usize) -> E::G1Affine {
-        if i == 0 {
-            *commitment
-        } else if i < mu {
-            self.fold_comms[i - 1]
-        } else {
-            *commitment
-        }
-    }
-}
-
 pub struct GeminiPCS<E: Pairing> {
     phantom: PhantomData<E>,
 }
@@ -227,18 +215,233 @@ fn kzg_quotient<F: Field>(coeffs: &[F], point: F, value: F) -> Vec<F> {
     q
 }
 
-fn validate_z<F: Field>(z: F, points: &[F]) -> Result<(), PCSError> {
-    if z.is_zero() {
-        return Err(PCSError::InvalidProof("Shplonk: z is zero".to_string()));
+// ═══════════════════════════════════════════════════════════════════
+// Gemini-Shplonk claim list — canonical fixed-order infrastructure.
+//
+// Prover and verifier MUST use the same claim list to:
+//   a) bind all claims in transcript before deriving Shplonk:nu,
+//   b) construct the batched quotient Q(X),
+//   c) compute G(X) in the prover and [G] in the verifier.
+//
+// Canonical claim order (claim index j):
+//   For i = 0..num_folds-1:
+//     [2i]     A_i at +r^{2^i}    (nu power = 2i)
+//     [2i+1]   A_i at -r^{2^i}    (nu power = 2i+1)
+//   [2*num_folds]     A_last at 0   (c0)
+//   [2*num_folds+1]   A_last at 1   (c0+c1)
+// ═══════════════════════════════════════════════════════════════════
+
+#[derive(Clone, Debug)]
+pub(crate) struct GeminiClaim<F: Field> {
+    /// Gemini round index: 0 = original polynomial, >=1 = fold polys
+    pub round: usize,
+    /// Opening point for this claim
+    pub point: F,
+    /// Claimed evaluation at the point
+    pub evaluation: F,
+}
+
+/// Build the canonical fixed-order claim list for Gemini-Shplonk.
+pub(crate) fn build_gemini_claims<F: Field>(
+    mu: usize,
+    r: F,
+    fold_evals: &[(F, F)],
+    c0: F,
+    c1: F,
+) -> Vec<GeminiClaim<F>> {
+    let num_folds = mu.saturating_sub(1);
+    let mut claims = Vec::with_capacity(2 * num_folds + 2);
+    let mut r_pow = r;
+    for i in 0..num_folds {
+        claims.push(GeminiClaim {
+            round: i,
+            point: r_pow,
+            evaluation: fold_evals[i].0,
+        });
+        claims.push(GeminiClaim {
+            round: i,
+            point: -r_pow,
+            evaluation: fold_evals[i].1,
+        });
+        r_pow = r_pow * r_pow;
     }
-    for &p in points {
-        if z == p || z == -p {
+    let last_round = mu.saturating_sub(1);
+    claims.push(GeminiClaim {
+        round: last_round,
+        point: F::zero(),
+        evaluation: c0,
+    });
+    claims.push(GeminiClaim {
+        round: last_round,
+        point: F::one(),
+        evaluation: c0 + c1,
+    });
+    claims
+}
+
+/// Absorb all Shplonk claims into the transcript in canonical order.
+/// Binds claim index, commitment, point, and evaluation before deriving
+/// Shplonk:nu. Called by both prover and verifier.
+pub(crate) fn append_gemini_claims_to_transcript<E: Pairing>(
+    claims: &[GeminiClaim<E::ScalarField>],
+    original_commitment: &E::G1Affine,
+    fold_comms: &[E::G1Affine],
+    transcript: &mut IOPTranscript<E::ScalarField>,
+) -> Result<(), PCSError> {
+    for (claim_idx, claim) in claims.iter().enumerate() {
+        let commit = if claim.round == 0 {
+            *original_commitment
+        } else {
+            fold_comms[claim.round - 1]
+        };
+        transcript.append_field_element(
+            b"Shplonk:claim_idx",
+            &E::ScalarField::from(claim_idx as u64),
+        )?;
+        transcript.append_serializable_element(b"Shplonk:claim_cm", &commit)?;
+        transcript.append_field_element(b"Shplonk:claim_pt", &claim.point)?;
+        transcript.append_field_element(b"Shplonk:claim_ev", &claim.evaluation)?;
+    }
+    Ok(())
+}
+
+/// Map a claim's round to the correct G1 commitment.
+fn claim_commit<E: Pairing>(
+    round: usize,
+    original_commitment: &E::G1Affine,
+    fold_comms: &[E::G1Affine],
+) -> E::G1Affine {
+    if round == 0 {
+        *original_commitment
+    } else {
+        fold_comms[round - 1]
+    }
+}
+
+// ── Production challenge validation helpers ──
+
+pub(crate) fn validate_shplonk_r<F: Field>(r: F, side: &str) -> Result<(), PCSError> {
+    if r.is_zero() {
+        return Err(PCSError::InvalidProof(format!(
+            "Gemini {side}: r=0 degenerates fold relations"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_shplonk_nu<F: Field>(nu: F, side: &str) -> Result<(), PCSError> {
+    if nu.is_zero() {
+        return Err(PCSError::InvalidProof(format!(
+            "Shplonk {side}: nu=0 makes batching degenerate"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_shplonk_z_against_claims<F: Field>(
+    z: F,
+    claims: &[GeminiClaim<F>],
+    side: &str,
+) -> Result<(), PCSError> {
+    if z.is_zero() {
+        return Err(PCSError::InvalidProof(format!("Shplonk {side}: z is zero")));
+    }
+    for claim in claims {
+        if z == claim.point {
             return Err(PCSError::InvalidProof(format!(
-                "Shplonk: z collides with opening point {p:?}"
+                "Shplonk {side}: z collides with claim point {:?}",
+                claim.point
             )));
         }
     }
     Ok(())
+}
+
+// ── Production Q / G / [G] helpers ──
+//
+// Q(X) = sum_j nu^j * (f_j(X) - v_j) / (X - x_j)
+// G(X) = Q(X) - sum_j nu^j/(z - x_j) * (f_j(X) - v_j)
+// Verifier reconstructs [G] = [Q] - sum_j nu^j/(z-x_j) * ([f_j] - v_j * [1])
+
+pub(crate) fn compute_shplonk_batched_quotient<F: Field>(
+    claims: &[GeminiClaim<F>],
+    a_polys: &[Vec<F>],
+    nu: F,
+    n: usize,
+) -> Vec<F> {
+    let mut batched_q = vec![F::zero(); n];
+    let mut nu_pow = F::one();
+    for claim in claims {
+        let q = kzg_quotient(&a_polys[claim.round], claim.point, claim.evaluation);
+        for (j, &qj) in q.iter().enumerate() {
+            batched_q[j] += nu_pow * qj;
+        }
+        nu_pow *= nu;
+    }
+    batched_q
+}
+
+pub(crate) fn compute_shplonk_g_coeffs<F: Field>(
+    claims: &[GeminiClaim<F>],
+    a_polys: &[Vec<F>],
+    batched_q: &[F],
+    nu: F,
+    z: F,
+    n: usize,
+) -> Result<Vec<F>, PCSError> {
+    let mut g_coeffs = batched_q.to_vec();
+    g_coeffs.resize(n, F::zero());
+    let mut nu_pow = F::one();
+    for claim in claims {
+        let denom = z - claim.point;
+        let inv = denom.inverse().ok_or_else(|| {
+            PCSError::InvalidProof(
+                "Shplonk prover: z collides with a claim point during G construction".to_string(),
+            )
+        })?;
+        let scale = nu_pow * inv;
+        for (j, &cj) in a_polys[claim.round].iter().enumerate() {
+            g_coeffs[j] -= scale * cj;
+        }
+        g_coeffs[0] += scale * claim.evaluation;
+        nu_pow *= nu;
+    }
+    Ok(g_coeffs)
+}
+
+pub(crate) fn compute_shplonk_g_commit<E: Pairing>(
+    claims: &[GeminiClaim<E::ScalarField>],
+    shplonk_q_commit: &E::G1Affine,
+    original_commitment: &E::G1Affine,
+    fold_comms: &[E::G1Affine],
+    nu: E::ScalarField,
+    z: E::ScalarField,
+    vp_g: &E::G1Affine,
+) -> Result<E::G1Affine, PCSError> {
+    let mut bases: Vec<E::G1Affine> = vec![*shplonk_q_commit];
+    let mut scalars: Vec<E::ScalarField> = vec![E::ScalarField::one()];
+    let mut identity_scalar = E::ScalarField::zero();
+    let mut nu_pow = E::ScalarField::one();
+
+    for claim in claims {
+        let commit = claim_commit::<E>(claim.round, original_commitment, fold_comms);
+        let denom = z - claim.point;
+        let inv = denom.inverse().ok_or_else(|| {
+            PCSError::InvalidProof(
+                "Shplonk verifier: z collides with a claim point during G reduction".to_string(),
+            )
+        })?;
+        let scale = nu_pow * inv;
+        bases.push(commit);
+        scalars.push(-scale);
+        identity_scalar += scale * claim.evaluation;
+        nu_pow *= nu;
+    }
+
+    bases.push(*vp_g);
+    scalars.push(identity_scalar);
+
+    Ok(E::G1::msm_unchecked(&bases, &scalars).into_affine())
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -308,11 +511,9 @@ fn gemini_open_with_transcript<E: Pairing>(
     }
 
     let r = transcript.get_and_append_challenge_vectors(b"r", 1)?[0];
-    if r.is_zero() {
-        return Err(PCSError::InvalidProver(
-            "Gemini: r=0 degenerates fold relations".to_string(),
-        ));
-    }
+    validate_shplonk_r(r, "prover").map_err(|_| {
+        PCSError::InvalidProver("Gemini: r=0 degenerates fold relations".to_string())
+    })?;
 
     let _t_claims = ScopedTimer::new(
         BACKEND,
@@ -342,17 +543,13 @@ fn gemini_open_with_transcript<E: Pairing>(
     }
     drop(_t_claims);
 
-    let num_folds = mu.saturating_sub(1);
-    for i in 0..num_folds {
-        transcript.append_field_element(b"Gemini:a_i", &fold_evals[i].1)?;
-    }
+    let claims = build_gemini_claims(mu, r, &fold_evals, c0, c1);
+    append_gemini_claims_to_transcript::<E>(&claims, &a0_commit, &fold_comms, transcript)?;
 
     let nu = transcript.get_and_append_challenge_vectors(b"Shplonk:nu", 1)?[0];
-    if nu.is_zero() {
-        return Err(PCSError::InvalidProver(
-            "Shplonk: nu=0 makes batching degenerate".to_string(),
-        ));
-    }
+    validate_shplonk_nu(nu, "prover").map_err(|_| {
+        PCSError::InvalidProver("Shplonk: nu=0 makes batching degenerate".to_string())
+    })?;
 
     let _t_batch_q = ScopedTimer::new(
         BACKEND,
@@ -362,37 +559,7 @@ fn gemini_open_with_transcript<E: Pairing>(
         1,
         "batched-quotient",
     );
-    let mut batched_q = vec![E::ScalarField::zero(); n];
-    let mut nu_pow = E::ScalarField::one();
-
-    let mut r_pow = r;
-    for i in 0..num_folds {
-        let q_pos = kzg_quotient(&a_polys[i], r_pow, fold_evals[i].0);
-        for (j, &qj) in q_pos.iter().enumerate() {
-            batched_q[j] += nu_pow * qj;
-        }
-        nu_pow *= nu;
-
-        let q_neg = kzg_quotient(&a_polys[i], -r_pow, fold_evals[i].1);
-        for (j, &qj) in q_neg.iter().enumerate() {
-            batched_q[j] += nu_pow * qj;
-        }
-        nu_pow *= nu;
-
-        r_pow = r_pow * r_pow;
-    }
-
-    let zero = E::ScalarField::zero();
-    let q_c0 = kzg_quotient(&a_polys[mu.saturating_sub(1)], zero, c0);
-    for (j, &qj) in q_c0.iter().enumerate() {
-        batched_q[j] += nu_pow * qj;
-    }
-    nu_pow *= nu;
-
-    let q_c1 = kzg_quotient(&a_polys[mu.saturating_sub(1)], one, c0 + c1);
-    for (j, &qj) in q_c1.iter().enumerate() {
-        batched_q[j] += nu_pow * qj;
-    }
+    let batched_q = compute_shplonk_batched_quotient(&claims, &a_polys, nu, n);
     drop(_t_batch_q);
 
     let _t_cm_q = ScopedTimer::new(
@@ -408,21 +575,8 @@ fn gemini_open_with_transcript<E: Pairing>(
     drop(_t_cm_q);
 
     let z = transcript.get_and_append_challenge_vectors(b"Shplonk:z", 1)?[0];
-    let z_points: Vec<E::ScalarField> = {
-        let mut pts = Vec::with_capacity(2 * num_folds + 2);
-        let mut rp = r;
-        for _ in 0..num_folds {
-            pts.push(rp);
-            rp = rp * rp;
-        }
-        pts
-    };
-    validate_z(z, &z_points)?;
-    if z == E::ScalarField::zero() || z == E::ScalarField::one() {
-        return Err(PCSError::InvalidProver(format!(
-            "Shplonk: z={z:?} collides with final_open points 0 or 1"
-        )));
-    }
+    validate_shplonk_z_against_claims(z, &claims, "prover")
+        .map_err(|_| PCSError::InvalidProver(format!("Shplonk: z={z:?} invalid")))?;
 
     let _t_partial = ScopedTimer::new(
         BACKEND,
@@ -432,64 +586,7 @@ fn gemini_open_with_transcript<E: Pairing>(
         1,
         "G-partial-eval",
     );
-    let mut g_coeffs = batched_q.clone();
-    g_coeffs.resize(n, E::ScalarField::zero());
-    let mut nu_pow = E::ScalarField::one();
-    let mut r_pow = r;
-
-    for i in 0..num_folds {
-        {
-            let denom = z - r_pow;
-            let inv = denom
-                .inverse()
-                .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z - r)".into()))?;
-            let scale = nu_pow * inv;
-            for (j, &cj) in a_polys[i].iter().enumerate() {
-                g_coeffs[j] -= scale * cj;
-            }
-            g_coeffs[0] += scale * fold_evals[i].0;
-        }
-        nu_pow *= nu;
-
-        {
-            let denom = z + r_pow;
-            let inv = denom
-                .inverse()
-                .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z + r)".into()))?;
-            let scale = nu_pow * inv;
-            for (j, &cj) in a_polys[i].iter().enumerate() {
-                g_coeffs[j] -= scale * cj;
-            }
-            g_coeffs[0] += scale * fold_evals[i].1;
-        }
-        nu_pow *= nu;
-
-        r_pow = r_pow * r_pow;
-    }
-
-    {
-        let inv_z = z
-            .inverse()
-            .ok_or_else(|| PCSError::InvalidProver("Shplonk: z inverse failed".into()))?;
-        let scale = nu_pow * inv_z;
-        for (j, &cj) in a_polys[mu.saturating_sub(1)].iter().enumerate() {
-            g_coeffs[j] -= scale * cj;
-        }
-        g_coeffs[0] += scale * c0;
-    }
-    nu_pow *= nu;
-
-    {
-        let denom = z - E::ScalarField::one();
-        let inv = denom
-            .inverse()
-            .ok_or_else(|| PCSError::InvalidProver("Shplonk: denom inverse (z-1)".into()))?;
-        let scale = nu_pow * inv;
-        for (j, &cj) in a_polys[mu.saturating_sub(1)].iter().enumerate() {
-            g_coeffs[j] -= scale * cj;
-        }
-        g_coeffs[0] += scale * (c0 + c1);
-    }
+    let g_coeffs = compute_shplonk_g_coeffs(&claims, &a_polys, &batched_q, nu, z, n)?;
     drop(_t_partial);
 
     let g_z = poly_eval(&g_coeffs, z);
@@ -587,11 +684,7 @@ fn gemini_verify_with_transcript<E: Pairing>(
     }
 
     let r = transcript.get_and_append_challenge_vectors(b"r", 1)?[0];
-    if r.is_zero() {
-        return Err(PCSError::InvalidProof(
-            "Gemini verify: r=0 degenerates fold relations".to_string(),
-        ));
-    }
+    validate_shplonk_r(r, "verifier")?;
 
     let _t_fold_check = ScopedTimer::new(
         BACKEND,
@@ -630,34 +723,14 @@ fn gemini_verify_with_transcript<E: Pairing>(
         return Ok(false);
     }
 
-    for i in 0..num_folds {
-        transcript.append_field_element(b"Gemini:a_i", &proof.fold_evals[i].1)?;
-    }
+    let claims = build_gemini_claims(mu, r, &proof.fold_evals, c0, c1);
+    append_gemini_claims_to_transcript::<E>(&claims, &commitment.0, &proof.fold_comms, transcript)?;
 
     let nu = transcript.get_and_append_challenge_vectors(b"Shplonk:nu", 1)?[0];
-    if nu.is_zero() {
-        return Err(PCSError::InvalidProof(
-            "Shplonk verify: nu=0 makes batching degenerate".to_string(),
-        ));
-    }
+    validate_shplonk_nu(nu, "verifier")?;
     transcript.append_serializable_element(b"Shplonk:Q", &proof.shplonk_q_commit)?;
     let z = transcript.get_and_append_challenge_vectors(b"Shplonk:z", 1)?[0];
-
-    let z_points: Vec<E::ScalarField> = {
-        let mut pts = Vec::with_capacity(2 * num_folds + 2);
-        let mut rp = r;
-        for _ in 0..num_folds {
-            pts.push(rp);
-            rp = rp * rp;
-        }
-        pts
-    };
-    validate_z(z, &z_points)?;
-    if z.is_zero() || z == one {
-        return Err(PCSError::InvalidProof(format!(
-            "Shplonk verify: z={z:?} collides with final_open point 0 or 1"
-        )));
-    }
+    validate_shplonk_z_against_claims(z, &claims, "verifier")?;
 
     let _t_msm = ScopedTimer::new(
         BACKEND,
@@ -667,76 +740,15 @@ fn gemini_verify_with_transcript<E: Pairing>(
         1,
         "shplonk-msm",
     );
-
-    let mut bases: Vec<E::G1Affine> = vec![proof.shplonk_q_commit];
-    let mut scalars: Vec<E::ScalarField> = vec![E::ScalarField::one()];
-    let mut identity_scalar = E::ScalarField::zero();
-
-    let mut nu_pow = E::ScalarField::one();
-    let mut r_pow = r;
-
-    for i in 0..num_folds {
-        let a_i_commit = proof.commitment_at_step(&commitment.0, i, mu);
-
-        {
-            let denom = z - r_pow;
-            let inv = denom.inverse().ok_or_else(|| {
-                PCSError::InvalidProof("Shplonk verify: (z - r) inverse failed".into())
-            })?;
-            let scale = nu_pow * inv;
-            bases.push(a_i_commit);
-            scalars.push(-scale);
-            identity_scalar += scale * proof.fold_evals[i].0;
-        }
-        nu_pow *= nu;
-
-        {
-            let denom = z + r_pow;
-            let inv = denom.inverse().ok_or_else(|| {
-                PCSError::InvalidProof("Shplonk verify: (z + r) inverse failed".into())
-            })?;
-            let scale = nu_pow * inv;
-            bases.push(a_i_commit);
-            scalars.push(-scale);
-            identity_scalar += scale * proof.fold_evals[i].1;
-        }
-        nu_pow *= nu;
-
-        r_pow = r_pow * r_pow;
-    }
-
-    let a_last_commit = if mu == 1 {
-        commitment.0
-    } else {
-        proof.fold_comms[mu - 2]
-    };
-
-    {
-        let inv_z = z
-            .inverse()
-            .ok_or_else(|| PCSError::InvalidProof("Shplonk verify: z inverse failed".into()))?;
-        let scale = nu_pow * inv_z;
-        bases.push(a_last_commit);
-        scalars.push(-scale);
-        identity_scalar += scale * c0;
-    }
-    nu_pow *= nu;
-
-    {
-        let denom = z - one;
-        let inv = denom
-            .inverse()
-            .ok_or_else(|| PCSError::InvalidProof("Shplonk verify: (z-1) inverse failed".into()))?;
-        let scale = nu_pow * inv;
-        bases.push(a_last_commit);
-        scalars.push(-scale);
-        identity_scalar += scale * (c0 + c1);
-    }
-
-    bases.push(vp.g);
-    scalars.push(identity_scalar);
-
-    let g_commit = E::G1::msm_unchecked(&bases, &scalars).into_affine();
+    let g_commit = compute_shplonk_g_commit::<E>(
+        &claims,
+        &proof.shplonk_q_commit,
+        &commitment.0,
+        &proof.fold_comms,
+        nu,
+        z,
+        &vp.g,
+    )?;
     drop(_t_msm);
 
     let _t_pairing = ScopedTimer::new(BACKEND, mu, n, "gemini_verify_kzg_pairing", 1, "1-pairing");
@@ -1649,7 +1661,7 @@ mod tests {
         }
     }
 
-    // ── Shplonk kzg_quotient correctness ──
+    // ── Shplonk algebraic tests (all call production helpers) ──
 
     #[test]
     fn test_kzg_quotient_correctness() {
@@ -1659,7 +1671,6 @@ mod tests {
             let point = Fr::rand(&mut rng);
             let value = poly_eval(&coeffs, point);
             let q = kzg_quotient(&coeffs, point, value);
-            // Verify (X-point)*q(X) + value == f(X) for some test points
             let test_x = Fr::rand(&mut rng);
             let f_test = poly_eval(&coeffs, test_x);
             let q_test = poly_eval(&q, test_x);
@@ -1668,60 +1679,477 @@ mod tests {
         }
     }
 
-    // ── Shplonk G(z)=0 property ──
-
     #[test]
-    fn test_shplonk_reduced_polynomial_vanishes_at_z() {
+    fn test_shplonk_g_vanishes_at_z() {
         let mut rng = test_rng();
-        for nv in [2, 4] {
-            let (ck, _vk) = setup(nv);
+        for nv in [1, 2, 4] {
+            let (_ck, _vk) = setup(nv);
             let p = rpoly(nv, &mut rng);
             let pt = rpt(nv, &mut rng);
-            let (proof, _val) = GeminiPCS::<E>::open(&ck, &p, &pt).unwrap();
-            // Proof has 1 Q commit + 1 KZG witness = O(1) G1 elements
-            // Verify it's not a Vec-based separate-KZG proof
-            assert!(proof.fold_comms.len() == nv.saturating_sub(1) || nv == 1);
+            let mu = p.num_vars();
+            let n = 1usize << mu;
+            let f_hat = p.to_evaluations();
+
+            let mut a_polys: Vec<Vec<Fr>> = Vec::with_capacity(mu);
+            a_polys.push(f_hat.clone());
+            for i in 0..mu.saturating_sub(1) {
+                a_polys.push(fold_polynomial(&a_polys[i], pt[i]));
+            }
+            let c0 = a_polys[mu.saturating_sub(1)][0];
+            let c1 = a_polys[mu.saturating_sub(1)][1];
+
+            let r = Fr::rand(&mut rng);
+            let mut fold_evals: Vec<(Fr, Fr)> = vec![];
+            let mut rp = r;
+            for i in 0..mu.saturating_sub(1) {
+                fold_evals.push((poly_eval(&a_polys[i], rp), poly_eval(&a_polys[i], -rp)));
+                rp = rp * rp;
+            }
+
+            let claims = build_gemini_claims(mu, r, &fold_evals, c0, c1);
+            let nu = Fr::rand(&mut rng);
+            let batched_q = compute_shplonk_batched_quotient(&claims, &a_polys, nu, n);
+
+            let z = loop {
+                let z = Fr::rand(&mut rng);
+                if validate_shplonk_z_against_claims(z, &claims, "test").is_ok() {
+                    break z;
+                }
+            };
+
+            let g_coeffs =
+                compute_shplonk_g_coeffs(&claims, &a_polys, &batched_q, nu, z, n).unwrap();
+            let g_z = poly_eval(&g_coeffs, z);
+            assert_eq!(g_z, Fr::zero(), "G(z) must be zero for nv={nv}");
         }
     }
 
-    // ── Challenge validation: r=0 rejected by helper ──
+    #[test]
+    fn test_shplonk_commit_g_matches_verifier_reduction() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [1, 2, 4] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let mu = p.num_vars();
+            let n = 1usize << mu;
+            let f_hat = p.to_evaluations();
+            let com = ck.try_commit(&f_hat)?;
+
+            let mut a_polys: Vec<Vec<Fr>> = Vec::with_capacity(mu);
+            a_polys.push(f_hat.clone());
+            for i in 0..mu.saturating_sub(1) {
+                a_polys.push(fold_polynomial(&a_polys[i], pt[i]));
+            }
+            let mut fold_comms: Vec<_> = vec![];
+            for a in a_polys.iter().skip(1) {
+                fold_comms.push(ck.try_commit(a)?);
+            }
+
+            let c0 = a_polys[mu.saturating_sub(1)][0];
+            let c1 = a_polys[mu.saturating_sub(1)][1];
+
+            let r = Fr::rand(&mut rng);
+            let mut fold_evals: Vec<(Fr, Fr)> = vec![];
+            let mut rp = r;
+            for i in 0..mu.saturating_sub(1) {
+                fold_evals.push((poly_eval(&a_polys[i], rp), poly_eval(&a_polys[i], -rp)));
+                rp = rp * rp;
+            }
+
+            let claims = build_gemini_claims(mu, r, &fold_evals, c0, c1);
+            let nu = Fr::rand(&mut rng);
+            let batched_q = compute_shplonk_batched_quotient(&claims, &a_polys, nu, n);
+            let q_commit = ck.try_commit(&batched_q)?;
+
+            let z = loop {
+                let z = Fr::rand(&mut rng);
+                if validate_shplonk_z_against_claims(z, &claims, "test").is_ok() {
+                    break z;
+                }
+            };
+
+            let g_coeffs = compute_shplonk_g_coeffs(&claims, &a_polys, &batched_q, nu, z, n)?;
+            let g_direct_commit = ck.try_commit(&g_coeffs)?;
+
+            let g_msm_commit =
+                compute_shplonk_g_commit::<E>(&claims, &q_commit, &com, &fold_comms, nu, z, &vk.g)?;
+
+            assert_eq!(
+                g_direct_commit, g_msm_commit,
+                "direct Commit(G) must equal verifier-reduction [G] for nv={nv}"
+            );
+
+            let witness_coeffs = kzg_quotient(&g_coeffs, z, Fr::zero());
+            let witness = ck.try_commit(&witness_coeffs)?;
+            assert!(
+                kzg_verify_pairing(&vk, &g_msm_commit, z, Fr::zero(), &witness)?,
+                "KZG pairing must verify G(z)=0 for nv={nv}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
-    fn test_gemini_rejects_r_zero_in_proof() {
+    fn test_shplonk_g_commit_differs_with_tampered_input() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let nv = 4;
-        let (ck, _vk) = setup(nv);
+        let (ck, vk) = setup(nv);
         let p = rpoly(nv, &mut rng);
         let pt = rpt(nv, &mut rng);
-        // Note: r is derived from FS transcript, so it's essentially never zero.
-        // The r=0 guard is tested structurally via the inline check.
-        // We verify the prover path works normally.
-        let (proof, val) = GeminiPCS::<E>::open(&ck, &p, &pt).unwrap();
-        assert!(!proof.fold_evals.is_empty() || nv == 1);
-        drop(val);
+        let mu = nv;
+        let n = 1 << nv;
+        let f_hat = p.to_evaluations();
+        let com = ck.try_commit(&f_hat)?;
+
+        let mut a_polys: Vec<Vec<Fr>> = Vec::with_capacity(mu);
+        a_polys.push(f_hat.clone());
+        for i in 0..mu.saturating_sub(1) {
+            a_polys.push(fold_polynomial(&a_polys[i], pt[i]));
+        }
+        let mut fold_comms: Vec<_> = vec![];
+        for a in a_polys.iter().skip(1) {
+            fold_comms.push(ck.try_commit(a)?);
+        }
+
+        let c0 = a_polys[mu.saturating_sub(1)][0];
+        let c1 = a_polys[mu.saturating_sub(1)][1];
+
+        let r = Fr::rand(&mut rng);
+        let mut fold_evals: Vec<(Fr, Fr)> = vec![];
+        let mut rp = r;
+        for i in 0..mu.saturating_sub(1) {
+            fold_evals.push((poly_eval(&a_polys[i], rp), poly_eval(&a_polys[i], -rp)));
+            rp = rp * rp;
+        }
+
+        let claims = build_gemini_claims(mu, r, &fold_evals, c0, c1);
+        let nu = Fr::rand(&mut rng);
+        let batched_q = compute_shplonk_batched_quotient(&claims, &a_polys, nu, n);
+        let q_commit = ck.try_commit(&batched_q)?;
+
+        let z = loop {
+            let z = Fr::rand(&mut rng);
+            if validate_shplonk_z_against_claims(z, &claims, "test").is_ok() {
+                break z;
+            }
+        };
+
+        let g_commit =
+            compute_shplonk_g_commit::<E>(&claims, &q_commit, &com, &fold_comms, nu, z, &vk.g)?;
+
+        // Tamper each input and expect a different G commit
+        let tampered_q = (q_commit.into_group() * Fr::from(2u64)).into_affine();
+        let g_tampered_q =
+            compute_shplonk_g_commit::<E>(&claims, &tampered_q, &com, &fold_comms, nu, z, &vk.g)?;
+        assert_ne!(g_commit, g_tampered_q, "tampered Q commit must differ");
+
+        let tampered_c0 = c0 + Fr::one();
+        let mut claims_tampered_eval = claims.clone();
+        claims_tampered_eval.last_mut().unwrap().evaluation = tampered_c0;
+        let g_tampered_eval = compute_shplonk_g_commit::<E>(
+            &claims_tampered_eval,
+            &q_commit,
+            &com,
+            &fold_comms,
+            nu,
+            z,
+            &vk.g,
+        )?;
+        assert_ne!(g_commit, g_tampered_eval, "tampered evaluation must differ");
+
+        Ok(())
     }
 
-    // ── Challenge validation: z collision ──
+    // ── Transcript binding tests (all call production
+    // append_gemini_claims_to_transcript) ──
+
+    fn build_test_transcript_and_derive_nu(
+        claims: &[GeminiClaim<Fr>],
+        orig_cm: &<E as Pairing>::G1Affine,
+        fold_cms: &[<E as Pairing>::G1Affine],
+    ) -> Fr {
+        let mut t1 = IOPTranscript::<Fr>::new(b"gemini-open");
+        t1.append_field_element(b"mu", &Fr::from(claims.len() as u64))
+            .unwrap();
+        append_gemini_claims_to_transcript::<E>(claims, orig_cm, fold_cms, &mut t1).unwrap();
+        t1.get_and_append_challenge_vectors(b"Shplonk:nu", 1)
+            .unwrap()[0]
+    }
 
     #[test]
-    fn test_validate_z_rejects_zero() {
-        let r = validate_z(Fr::zero(), &[Fr::one(), Fr::from(2u64)]);
-        assert!(r.is_err(), "z=0 must be rejected");
+    fn test_transcript_nu_changes_on_positive_eval() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+        let _gs = vec![g, g];
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let mut claims_b = claims.clone();
+        claims_b[0].evaluation += Fr::one();
+        let nu_b = build_test_transcript_and_derive_nu(&claims_b, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing positive eval must change nu");
     }
 
     #[test]
-    fn test_validate_z_rejects_collision() {
-        let r = validate_z(Fr::from(2u64), &[Fr::one(), Fr::from(2u64)]);
-        assert!(r.is_err(), "z collision must be rejected");
+    fn test_transcript_nu_changes_on_negative_eval() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let mut claims_b = claims.clone();
+        claims_b[1].evaluation += Fr::one();
+        let nu_b = build_test_transcript_and_derive_nu(&claims_b, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing negative eval must change nu");
     }
 
     #[test]
-    fn test_validate_z_accepts_valid() {
-        let r = validate_z(Fr::from(3u64), &[Fr::one(), Fr::from(2u64)]);
-        assert!(r.is_ok(), "valid z must be accepted");
+    fn test_transcript_nu_changes_on_c0() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let mut claims_b = claims.clone();
+        claims_b[2].evaluation += Fr::one();
+        let nu_b = build_test_transcript_and_derive_nu(&claims_b, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing c0 must change nu");
     }
 
-    // ── Shplonk Q commit tamper must reject ──
+    #[test]
+    fn test_transcript_nu_changes_on_c0_plus_c1() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let mut claims_b = claims.clone();
+        claims_b[3].evaluation += Fr::one();
+        let nu_b = build_test_transcript_and_derive_nu(&claims_b, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing c0+c1 must change nu");
+    }
+
+    #[test]
+    fn test_transcript_nu_changes_on_fold_commit() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let tampered_fc = (g.into_group() * Fr::from(2u64)).into_affine();
+        let nu_b = build_test_transcript_and_derive_nu(&claims, &g, &[tampered_fc]);
+        assert_ne!(nu_a, nu_b, "changing fold commit must change nu");
+    }
+
+    #[test]
+    fn test_transcript_nu_changes_on_original_commitment() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let tampered_orig = (g.into_group() * Fr::from(3u64)).into_affine();
+        let nu_b = build_test_transcript_and_derive_nu(&claims, &tampered_orig, &[g]);
+        assert_ne!(nu_a, nu_b, "changing original commitment must change nu");
+    }
+
+    #[test]
+    fn test_transcript_nu_changes_on_claim_point() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        let mut claims_b = claims.clone();
+        claims_b[2].point += Fr::one();
+        let nu_b = build_test_transcript_and_derive_nu(&claims_b, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing claim point must change nu");
+    }
+
+    #[test]
+    fn test_transcript_nu_changes_on_claim_idx() {
+        let mut rng = test_rng();
+        let c0 = Fr::rand(&mut rng);
+        let c1 = Fr::rand(&mut rng);
+        let r = Fr::rand(&mut rng);
+        let fe = vec![(Fr::rand(&mut rng), Fr::rand(&mut rng))];
+        let mut claims = build_gemini_claims(2, r, &fe, c0, c1);
+        let g = <E as Pairing>::G1Affine::generator();
+
+        let nu_a = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        claims.swap(0, 1);
+        let nu_b = build_test_transcript_and_derive_nu(&claims, &g, &[g]);
+        assert_ne!(nu_a, nu_b, "changing claim order must change nu");
+    }
+
+    // ── Challenge validation helpers (call production validate_* functions) ──
+
+    #[test]
+    fn test_validate_shplonk_r_rejects_zero() {
+        assert!(validate_shplonk_r(Fr::zero(), "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_shplonk_r_accepts_nonzero() {
+        let mut rng = test_rng();
+        let r = loop {
+            let r = Fr::rand(&mut rng);
+            if !r.is_zero() {
+                break r;
+            }
+        };
+        assert!(validate_shplonk_r(r, "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shplonk_nu_rejects_zero() {
+        assert!(validate_shplonk_nu(Fr::zero(), "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_shplonk_nu_accepts_nonzero() {
+        let mut rng = test_rng();
+        let nu = loop {
+            let nu = Fr::rand(&mut rng);
+            if !nu.is_zero() {
+                break nu;
+            }
+        };
+        assert!(validate_shplonk_nu(nu, "test").is_ok());
+    }
+
+    #[test]
+    fn test_validate_shplonk_z_rejects_zero() {
+        let mut rng = test_rng();
+        let claims = build_gemini_claims(
+            2,
+            Fr::rand(&mut rng),
+            &[(Fr::rand(&mut rng), Fr::rand(&mut rng))],
+            Fr::rand(&mut rng),
+            Fr::rand(&mut rng),
+        );
+        assert!(validate_shplonk_z_against_claims(Fr::zero(), &claims, "test").is_err());
+    }
+
+    #[test]
+    fn test_validate_shplonk_z_rejects_collision_with_fold_point() {
+        let mut rng = test_rng();
+        let r = Fr::rand(&mut rng);
+        let mut rp = r;
+        for _ in 0..3 {
+            let claims = build_gemini_claims(
+                4,
+                r,
+                &[
+                    (Fr::rand(&mut rng), Fr::rand(&mut rng)),
+                    (Fr::rand(&mut rng), Fr::rand(&mut rng)),
+                    (Fr::rand(&mut rng), Fr::rand(&mut rng)),
+                ],
+                Fr::rand(&mut rng),
+                Fr::rand(&mut rng),
+            );
+            // rp is a claim point (r or some r^{2^i})
+            assert!(
+                validate_shplonk_z_against_claims(rp, &claims, "test").is_err(),
+                "z collides with positive claim point"
+            );
+            assert!(
+                validate_shplonk_z_against_claims(-rp, &claims, "test").is_err(),
+                "z collides with negative claim point"
+            );
+            rp = rp * rp;
+        }
+    }
+
+    #[test]
+    fn test_validate_shplonk_z_rejects_collision_with_final_0() {
+        let mut rng = test_rng();
+        let claims = build_gemini_claims(
+            2,
+            Fr::rand(&mut rng),
+            &[(Fr::rand(&mut rng), Fr::rand(&mut rng))],
+            Fr::rand(&mut rng),
+            Fr::rand(&mut rng),
+        );
+        assert!(
+            validate_shplonk_z_against_claims(Fr::zero(), &claims, "test").is_err(),
+            "z=0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_shplonk_z_rejects_collision_with_final_1() {
+        let mut rng = test_rng();
+        let claims = build_gemini_claims(
+            2,
+            Fr::rand(&mut rng),
+            &[(Fr::rand(&mut rng), Fr::rand(&mut rng))],
+            Fr::rand(&mut rng),
+            Fr::rand(&mut rng),
+        );
+        assert!(
+            validate_shplonk_z_against_claims(Fr::one(), &claims, "test").is_err(),
+            "z=1 must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_validate_shplonk_z_accepts_non_colliding() {
+        let mut rng = test_rng();
+        for nv in [1usize, 2, 4] {
+            let fe: Vec<(Fr, Fr)> = (0..nv.saturating_sub(1))
+                .map(|_| (Fr::rand(&mut rng), Fr::rand(&mut rng)))
+                .collect();
+            let claims = build_gemini_claims(
+                nv,
+                Fr::rand(&mut rng),
+                &fe,
+                Fr::rand(&mut rng),
+                Fr::rand(&mut rng),
+            );
+            let z = loop {
+                let z = Fr::rand(&mut rng);
+                if validate_shplonk_z_against_claims(z, &claims, "test").is_ok() {
+                    break z;
+                }
+            };
+            assert!(
+                validate_shplonk_z_against_claims(z, &claims, "test").is_ok(),
+                "valid z must be accepted for nv={nv}"
+            );
+        }
+    }
+
+    // ── Shplonk Q commit tamper must reject (production path) ──
 
     #[test]
     fn test_gemini_reject_tampered_q_commit() -> Result<(), PCSError> {
