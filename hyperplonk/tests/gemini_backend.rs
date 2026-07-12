@@ -12,9 +12,7 @@ mod tests {
     };
     use subroutines::{
         pcs::{
-            prelude::{
-                GeminiPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS, ZeromorphPCS,
-            },
+            prelude::{GeminiPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -60,7 +58,7 @@ mod tests {
         let nv = 5;
         let size = 1 << nv;
         let mkzg_srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
-        let sym_srs = MulcsSymmetricPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let reci_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let zm_srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let sam_srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let gem_srs = GeminiPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
@@ -83,20 +81,21 @@ mod tests {
             MultilinearKzgPCS<E>,
         >>::verify(&vk, &circuit.public_inputs, &proof)?);
 
-        // MulcsSymmetric
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::preprocess(
+        // ReciPCS (the canonical symmetric reciprocal construction)
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
             &circuit.index,
-            &sym_srs,
+            &reci_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
-        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<
-            E,
-            MulcsSymmetricPCS<E>,
-        >>::verify(&vk, &circuit.public_inputs, &proof)?);
+        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+            &vk,
+            &circuit.public_inputs,
+            &proof
+        )?);
 
         // Zeromorph
         let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ZeromorphPCS<E>>>::preprocess(

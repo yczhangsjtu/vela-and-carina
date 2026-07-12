@@ -1,4 +1,4 @@
-//! HyperPlonk PCS profile runner — supports mKZG, Mulcs, MulcsSym, Zeromorph,
+//! HyperPlonk PCS profile runner — supports mKZG, Mulcs, ReciPCS, Zeromorph,
 //! Samaritan.
 //!
 //! **#[ignore] — does not run in default cargo test.**
@@ -22,7 +22,7 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -34,8 +34,7 @@ mod tests {
     const VALID_BACKENDS: &[&str] = &[
         "mulcs",
         "mkzg",
-        "mulcs_symmetric",
-        "symmetric",
+        "recipcs",
         "zeromorph",
         "samaritan",
         "both",
@@ -56,6 +55,10 @@ mod tests {
 
     fn default_backend() -> String {
         let val = env::var("BACKEND").unwrap_or_else(|_| "mulcs".to_string());
+        let val = match val.as_str() {
+            "symmetric" | "mulcs_symmetric" => "recipcs".to_string(),
+            _ => val,
+        };
         if !VALID_BACKENDS.contains(&val.as_str()) {
             panic!(
                 "BACKEND={val} invalid — must be one of {:?}",
@@ -260,7 +263,7 @@ mod tests {
         Ok(())
     }
 
-    fn bench_symmetric(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
+    fn bench_recipcs(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let n = 1 << nv;
         let gate = CustomizedGates::vanilla_plonk_gate();
@@ -269,20 +272,19 @@ mod tests {
 
         for r in 0..repeat {
             let t0 = Instant::now();
-            let srs = MulcsSymmetricPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
             let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("top_level", "MulcsSym", nv, n, r, "srs_gen", srs_ms, 1, "");
+            print_csv_row("top_level", "ReciPCS", nv, n, r, "srs_gen", srs_ms, 1, "");
 
             let t0 = Instant::now();
-            let (pk, vk) =
-                <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::preprocess(
-                    &circuit.index,
-                    &srs,
-                )?;
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+                &circuit.index,
+                &srs,
+            )?;
             let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
             print_csv_row(
                 "top_level",
-                "MulcsSym",
+                "ReciPCS",
                 nv,
                 n,
                 r,
@@ -293,16 +295,16 @@ mod tests {
             );
 
             let t0 = Instant::now();
-            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::prove(
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
             )?;
             let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("top_level", "MulcsSym", nv, n, r, "prove", prove_ms, 1, "");
+            print_csv_row("top_level", "ReciPCS", nv, n, r, "prove", prove_ms, 1, "");
 
             let t0 = Instant::now();
-            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::verify(
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
@@ -310,7 +312,7 @@ mod tests {
             let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
             print_csv_row(
                 "top_level",
-                "MulcsSym",
+                "ReciPCS",
                 nv,
                 n,
                 r,
@@ -319,7 +321,7 @@ mod tests {
                 1,
                 if ok { "pass" } else { "FAIL" },
             );
-            assert!(ok, "MulcsSymmetric verify failed at nv={nv} r={r}");
+            assert!(ok, "ReciPCS verify failed at nv={nv} r={r}");
         }
         Ok(())
     }
@@ -418,9 +420,9 @@ mod tests {
                 println!("# --- Zeromorph nv={nv} N={n} ---");
                 bench_zeromorph(nv, repeat)?;
             }
-            if backend == "symmetric" || backend == "mulcs_symmetric" || backend == "all" {
-                println!("# --- MulcsSym nv={nv} N={n} ---");
-                bench_symmetric(nv, repeat)?;
+            if backend == "recipcs" || backend == "all" {
+                println!("# --- ReciPCS nv={nv} N={n} ---");
+                bench_recipcs(nv, repeat)?;
             }
             if backend == "samaritan" || backend == "all" {
                 println!("# --- Samaritan nv={nv} N={n} ---");

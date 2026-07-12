@@ -12,7 +12,7 @@ mod tests {
     };
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -65,7 +65,7 @@ mod tests {
 
         let mkzg_srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let claymore_srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
-        let sym_srs = MulcsSymmetricPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let reci_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let zm_srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let sam_srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
 
@@ -110,23 +110,23 @@ mod tests {
             "Mulcs Claymore backend verify failed"
         );
 
-        // Mulcs Symmetric
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::preprocess(
+        // ReciPCS (the canonical symmetric reciprocal construction)
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
             &circuit.index,
-            &sym_srs,
+            &reci_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
         assert!(
-            <PolyIOP<FrType> as HyperPlonkSNARK<E, MulcsSymmetricPCS<E>>>::verify(
+            <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
             )?,
-            "Mulcs Symmetric backend verify failed"
+            "ReciPCS backend verify failed"
         );
 
         // Zeromorph

@@ -29,11 +29,13 @@ use transcript::IOPTranscript;
 
 use crate::pcs::profile;
 pub(crate) mod srs;
-pub mod symmetric;
 mod util;
 
 use srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam};
-pub use symmetric::{MulcsSymmetricPCS, MulcsSymmetricProof};
+// The symmetric construction was moved to the standalone ReciPCS module.
+// Keep these legacy convenience aliases; they no longer select a second
+// implementation or a separate benchmark backend.
+pub use crate::pcs::recipcs::{ReciPCS as MulcsSymmetricPCS, ReciProof as MulcsSymmetricProof};
 pub(crate) use util::UnivarPoly;
 
 pub struct MulcsPCS<E: Pairing> {

@@ -14,8 +14,7 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                GeminiPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS,
-                SamaritanPCS, ZeromorphPCS,
+                GeminiPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -124,7 +123,6 @@ mod tests {
         }
 
         run_backend!(MultilinearKzgPCS<E>, "mKZG");
-        run_backend!(MulcsSymmetricPCS<E>, "MulcsSymmetric");
         run_backend!(ZeromorphPCS<E>, "Zeromorph");
         run_backend!(SamaritanPCS<E>, "Samaritan");
         run_backend!(GeminiPCS<E>, "Gemini");

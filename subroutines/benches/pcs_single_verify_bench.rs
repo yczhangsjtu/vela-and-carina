@@ -13,8 +13,8 @@ use criterion::{
 use std::{env, time::Duration};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
-        ReciPCS, SamaritanPCS, ZeromorphPCS,
+        GeminiPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS, SamaritanPCS,
+        ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -22,11 +22,10 @@ use subroutines::pcs::{
 type E = Bls12_381;
 
 const DEFAULT_NV_RANGE: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
-const ALL_BACKENDS: [&str; 8] = [
+const ALL_BACKENDS: [&str; 7] = [
     "mkzg",
     "gemini",
     "mulcs",
-    "symmetric",
     "samaritan",
     "zeromorph",
     "recipcs",
@@ -57,6 +56,7 @@ fn parse_backends() -> Vec<String> {
         return ALL_BACKENDS.iter().map(|s| s.to_string()).collect();
     }
     let canonical = match sel.as_str() {
+        "symmetric" | "mulcs_symmetric" | "mulcs-symmetric" => "recipcs".to_string(),
         "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => "nrg".to_string(),
         other => other.to_string(),
     };
@@ -183,12 +183,6 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
                 "mkzg" => bench_backend::<MultilinearKzgPCS<E>>(&mut group, &mut rng, "mKZG", nv),
                 "gemini" => bench_backend::<GeminiPCS<E>>(&mut group, &mut rng, "Gemini", nv),
                 "mulcs" => bench_backend::<MulcsPCS<E>>(&mut group, &mut rng, "MulcsClaymore", nv),
-                "symmetric" => bench_backend::<MulcsSymmetricPCS<E>>(
-                    &mut group,
-                    &mut rng,
-                    "MulcsSymmetric",
-                    nv,
-                ),
                 "samaritan" => {
                     bench_backend::<SamaritanPCS<E>>(&mut group, &mut rng, "Samaritan", nv)
                 },

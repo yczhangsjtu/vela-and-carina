@@ -8,19 +8,18 @@ use ark_std::{sync::Arc, test_rng};
 use std::{env, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
-        ReciPCS, SamaritanPCS, ZeromorphPCS,
+        GeminiPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS, SamaritanPCS,
+        ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
 const VERIFY_REPETITIONS: usize = 100;
-const ALL_BACKENDS: [&str; 8] = [
+const ALL_BACKENDS: [&str; 7] = [
     "mkzg",
     "gemini",
     "mulcs",
-    "symmetric",
     "samaritan",
     "zeromorph",
     "recipcs",
@@ -79,8 +78,9 @@ fn parse_backends() -> Result<Vec<String>, PCSError> {
             .map(|name| (*name).to_string())
             .collect());
     }
-    // Accept a few friendly aliases for the NestedGridKZG backend.
+    // The old symmetric Mulcs name is a compatibility alias for ReciPCS.
     let canonical = match selected.as_str() {
+        "symmetric" | "mulcs_symmetric" | "mulcs-symmetric" => "recipcs".to_string(),
         "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => "nrg".to_string(),
         other => other.to_string(),
     };
@@ -88,7 +88,7 @@ fn parse_backends() -> Result<Vec<String>, PCSError> {
         Ok(vec![canonical])
     } else {
         Err(PCSError::InvalidParameters(format!(
-            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, symmetric, samaritan, zeromorph, recipcs, nrg, or all"
+            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, samaritan, zeromorph, recipcs, nrg, or all"
         )))
     }
 }
@@ -114,9 +114,6 @@ fn bench_all() -> Result<(), PCSError> {
                 "mkzg" => bench_backend::<MultilinearKzgPCS<Bls12_381>>(&mut rng, "mKZG", nv)?,
                 "gemini" => bench_backend::<GeminiPCS<Bls12_381>>(&mut rng, "Gemini", nv)?,
                 "mulcs" => bench_backend::<MulcsPCS<Bls12_381>>(&mut rng, "MulcsClaymore", nv)?,
-                "symmetric" => {
-                    bench_backend::<MulcsSymmetricPCS<Bls12_381>>(&mut rng, "MulcsSymmetric", nv)?
-                },
                 "samaritan" => bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv)?,
                 "zeromorph" => bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv)?,
                 "recipcs" => bench_backend::<ReciPCS<Bls12_381>>(&mut rng, "ReciPCS", nv)?,
