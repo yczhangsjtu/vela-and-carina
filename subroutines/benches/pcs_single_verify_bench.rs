@@ -10,18 +10,65 @@ use ark_std::{rand::Rng, sync::Arc, test_rng, UniformRand};
 use criterion::{
     black_box, measurement::WallTime, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use std::time::Duration;
+use std::{env, time::Duration};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, SamaritanPCS,
-        ZeromorphPCS,
+        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
+        ReciPCS, SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
 
 type E = Bls12_381;
 
-const NV_RANGE: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
+const DEFAULT_NV_RANGE: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
+const ALL_BACKENDS: [&str; 8] = [
+    "mkzg",
+    "gemini",
+    "mulcs",
+    "symmetric",
+    "samaritan",
+    "zeromorph",
+    "recipcs",
+    "nrg",
+];
+
+/// Parse `PCS_VERIFY_NV_RANGE` (comma separated), default 8..=20 step 2.
+fn parse_nv_range() -> Vec<usize> {
+    match env::var("PCS_VERIFY_NV_RANGE") {
+        Ok(raw) => raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .collect(),
+        Err(_) => DEFAULT_NV_RANGE.to_vec(),
+    }
+}
+
+/// Parse `PCS_VERIFY_BACKEND`, default all. Supports friendly NRG aliases.
+fn parse_backends() -> Vec<String> {
+    let raw = match env::var("PCS_VERIFY_BACKEND") {
+        Ok(v) => v,
+        Err(_) => {
+            return ALL_BACKENDS.iter().map(|s| s.to_string()).collect();
+        },
+    };
+    let sel = raw.trim().to_ascii_lowercase();
+    if sel == "all" {
+        return ALL_BACKENDS.iter().map(|s| s.to_string()).collect();
+    }
+    let canonical = match sel.as_str() {
+        "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => "nrg".to_string(),
+        other => other.to_string(),
+    };
+    if ALL_BACKENDS.contains(&canonical.as_str()) {
+        vec![canonical]
+    } else {
+        panic!(
+            "PCS_VERIFY_BACKEND: unsupported '{raw}'; use one of {:?} or all",
+            ALL_BACKENDS
+        );
+    }
+}
 
 struct VerifyInstance<PCS>
 where
@@ -97,6 +144,7 @@ where
         Evaluation = Fr,
     >,
 {
+    // Setup and proof generation are OUTSIDE `b.iter`; only verify is timed.
     let instance = prepare_instance::<PCS, _>(rng, nv)?;
     let n = 1u64 << nv;
     group.throughput(Throughput::Elements(1));
@@ -124,19 +172,39 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(2));
 
-    for nv in NV_RANGE {
-        bench_backend::<MultilinearKzgPCS<E>>(&mut group, &mut rng, "mKZG", nv)
-            .expect("mKZG setup/proof generation failed");
-        bench_backend::<GeminiPCS<E>>(&mut group, &mut rng, "Gemini", nv)
-            .expect("Gemini setup/proof generation failed");
-        bench_backend::<MulcsPCS<E>>(&mut group, &mut rng, "MulcsClaymore", nv)
-            .expect("Mulcs setup/proof generation failed");
-        bench_backend::<MulcsSymmetricPCS<E>>(&mut group, &mut rng, "MulcsSymmetric", nv)
-            .expect("MulcsSymmetric setup/proof generation failed");
-        bench_backend::<SamaritanPCS<E>>(&mut group, &mut rng, "Samaritan", nv)
-            .expect("Samaritan setup/proof generation failed");
-        bench_backend::<ZeromorphPCS<E>>(&mut group, &mut rng, "Zeromorph", nv)
-            .expect("Zeromorph setup/proof generation failed");
+    let nv_range = parse_nv_range();
+    let backends = parse_backends();
+
+    // Only the selected backends are instantiated, so filtering to e.g. `nrg`
+    // avoids pre-generating every other backend's large (nv=20) SRS.
+    for nv in nv_range {
+        for backend in &backends {
+            match backend.as_str() {
+                "mkzg" => bench_backend::<MultilinearKzgPCS<E>>(&mut group, &mut rng, "mKZG", nv),
+                "gemini" => bench_backend::<GeminiPCS<E>>(&mut group, &mut rng, "Gemini", nv),
+                "mulcs" => bench_backend::<MulcsPCS<E>>(&mut group, &mut rng, "MulcsClaymore", nv),
+                "symmetric" => bench_backend::<MulcsSymmetricPCS<E>>(
+                    &mut group,
+                    &mut rng,
+                    "MulcsSymmetric",
+                    nv,
+                ),
+                "samaritan" => {
+                    bench_backend::<SamaritanPCS<E>>(&mut group, &mut rng, "Samaritan", nv)
+                },
+                "zeromorph" => {
+                    bench_backend::<ZeromorphPCS<E>>(&mut group, &mut rng, "Zeromorph", nv)
+                },
+                "recipcs" => bench_backend::<ReciPCS<E>>(&mut group, &mut rng, "ReciPCS", nv),
+                "nrg" => {
+                    bench_backend::<NestedGridKzgPCS<E>>(&mut group, &mut rng, "NestedGridKZG", nv)
+                },
+                other => panic!("unreachable backend {other}"),
+            }
+            .unwrap_or_else(|e| {
+                panic!("{backend} setup/proof generation failed at nv={nv}: {e:?}")
+            });
+        }
     }
 
     group.finish();

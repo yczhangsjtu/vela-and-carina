@@ -8,21 +8,23 @@ use ark_std::{sync::Arc, test_rng};
 use std::{env, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, PCSError, SamaritanPCS,
-        ZeromorphPCS,
+        GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
+        ReciPCS, SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
 const VERIFY_REPETITIONS: usize = 100;
-const ALL_BACKENDS: [&str; 6] = [
+const ALL_BACKENDS: [&str; 8] = [
     "mkzg",
     "gemini",
     "mulcs",
     "symmetric",
     "samaritan",
     "zeromorph",
+    "recipcs",
+    "nrg",
 ];
 
 fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
@@ -77,11 +79,16 @@ fn parse_backends() -> Result<Vec<String>, PCSError> {
             .map(|name| (*name).to_string())
             .collect());
     }
-    if ALL_BACKENDS.contains(&selected.as_str()) {
-        Ok(vec![selected])
+    // Accept a few friendly aliases for the NestedGridKZG backend.
+    let canonical = match selected.as_str() {
+        "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => "nrg".to_string(),
+        other => other.to_string(),
+    };
+    if ALL_BACKENDS.contains(&canonical.as_str()) {
+        Ok(vec![canonical])
     } else {
         Err(PCSError::InvalidParameters(format!(
-            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, symmetric, samaritan, zeromorph, or all"
+            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, symmetric, samaritan, zeromorph, recipcs, nrg, or all"
         )))
     }
 }
@@ -112,6 +119,10 @@ fn bench_all() -> Result<(), PCSError> {
                 },
                 "samaritan" => bench_backend::<SamaritanPCS<Bls12_381>>(&mut rng, "Samaritan", nv)?,
                 "zeromorph" => bench_backend::<ZeromorphPCS<Bls12_381>>(&mut rng, "Zeromorph", nv)?,
+                "recipcs" => bench_backend::<ReciPCS<Bls12_381>>(&mut rng, "ReciPCS", nv)?,
+                "nrg" => {
+                    bench_backend::<NestedGridKzgPCS<Bls12_381>>(&mut rng, "NestedGridKZG", nv)?
+                },
                 _ => unreachable!("parse_backends validates values"),
             }
         }

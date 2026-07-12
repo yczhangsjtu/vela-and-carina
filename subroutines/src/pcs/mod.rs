@@ -8,6 +8,7 @@ mod errors;
 mod gemini;
 mod mulcs;
 mod multilinear_kzg;
+mod nested_grid_kzg;
 pub(crate) mod profile;
 mod recipcs;
 mod samaritan;

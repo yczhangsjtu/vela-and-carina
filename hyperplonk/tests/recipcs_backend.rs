@@ -72,9 +72,14 @@ mod tests {
         if !bad_inputs.is_empty() {
             bad_inputs[0] += Fr::from(1u64);
             let res = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
-                &vk, &bad_inputs, &proof,
+                &vk,
+                &bad_inputs,
+                &proof,
             );
-            assert!(res.is_err() || !res.unwrap(), "tampered PI must be rejected");
+            assert!(
+                res.is_err() || !res.unwrap(),
+                "tampered PI must be rejected"
+            );
         }
         Ok(())
     }
@@ -117,13 +122,10 @@ mod tests {
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
-        assert!(
-            <PolyIOP<FrType> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>>>::verify(
-                &vk_m,
-                &circuit.public_inputs,
-                &proof_m
-            )?
-        );
+        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<
+            E,
+            MultilinearKzgPCS<E>,
+        >>::verify(&vk_m, &circuit.public_inputs, &proof_m)?);
         Ok(())
     }
 }

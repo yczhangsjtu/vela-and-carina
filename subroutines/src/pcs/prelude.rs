@@ -20,6 +20,10 @@ pub use crate::pcs::{
         srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam},
         MultilinearKzgPCS, MultilinearKzgProof,
     },
+    nested_grid_kzg::{
+        srs::{NestedGridKzgProverParam, NestedGridKzgUniversalParams, NestedGridKzgVerifierParam},
+        NestedGridKzgPCS, NestedGridKzgProof,
+    },
     recipcs::{
         srs::{ReciProverParam, ReciUniversalParams, ReciVerifierParam},
         ReciPCS, ReciProof,

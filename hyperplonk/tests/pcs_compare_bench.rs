@@ -1,19 +1,19 @@
 //! HyperPlonk PCS comparison benchmark.
 //!
-//! Backends: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini
-//! Gemini uses naive separate-KZG openings (NOT Shplonk-batched).
+//! Backends: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini,
+//! NestedGridKZG. Gemini uses naive separate-KZG openings (NOT Shplonk).
 //!
 //! **These tests are `#[ignore]` and do not run in default `cargo test`.**
 //!
 //! Env vars:
 //!   NV_RANGE=4,6        (default: 4,5,6)
-//!   BACKEND=gemini       (default: all)
-//!   BACKEND=all          (runs all 6 backends)
+//!   BACKEND=nrg          (default: all)
+//!   BACKEND=all          (runs all backends)
 //! Supported BACKEND values: mKZG, Mulcs, MulcsSymmetric, Zeromorph,
-//!                            Samaritan, Gemini, all
+//!                            Samaritan, Gemini, NestedGridKZG (nrg), all
 //!
 //! Examples:
-//!   NV_RANGE=4 BACKEND=gemini cargo test -p hyperplonk --release \
+//!   NV_RANGE=4 BACKEND=nrg cargo test -p hyperplonk --release \
 //!     --test pcs_compare_bench -- --ignored --nocapture
 //!
 //!   NV_RANGE=4,6 BACKEND=all cargo test -p hyperplonk --release \
@@ -31,8 +31,8 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, SamaritanPCS,
-                ZeromorphPCS,
+                GeminiPCS, MulcsPCS, MulcsSymmetricPCS, MultilinearKzgPCS, NestedGridKzgPCS,
+                SamaritanPCS, ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -59,6 +59,7 @@ mod tests {
         "Zeromorph",
         "Samaritan",
         "Gemini",
+        "NestedGridKZG",
     ];
 
     fn selected_backends() -> Vec<&'static str> {
@@ -75,8 +76,9 @@ mod tests {
             "zeromorph" => vec!["Zeromorph"],
             "samaritan" => vec!["Samaritan"],
             "gemini" => vec!["Gemini"],
+            "nrg" | "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => vec!["NestedGridKZG"],
             _ => panic!(
-                "unknown BACKEND '{raw}'. Supported: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini, all"
+                "unknown BACKEND '{raw}'. Supported: mKZG, Mulcs, MulcsSymmetric, Zeromorph, Samaritan, Gemini, NestedGridKZG (nrg), all"
             ),
         }
     }
@@ -280,6 +282,40 @@ mod tests {
 
                 let t0 = Instant::now();
                 let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, GeminiPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
+            },
+            "NestedGridKZG" => {
+                let t0 = Instant::now();
+                let srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) =
+                    <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::preprocess(
+                        &circuit.index,
+                        &srs,
+                    )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::verify(
                     &vk,
                     &circuit.public_inputs,
                     &proof,

@@ -49,6 +49,11 @@ name = "recipcs-benches"
 path = "benches/recipcs_bench.rs"
 harness = false
 
+[[bench]]
+name = "nested-grid-kzg-benches"
+path = "benches/nested_grid_kzg_bench.rs"
+harness = false
+
 [features]
 # default = [ "parallel", "print-trace" ]
 default = ["parallel"]
