@@ -20,6 +20,10 @@ pub use crate::pcs::{
         srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam},
         MultilinearKzgPCS, MultilinearKzgProof,
     },
+    recipcs::{
+        srs::{ReciProverParam, ReciUniversalParams, ReciVerifierParam},
+        ReciPCS, ReciProof,
+    },
     samaritan::{
         srs::{SamaritanProverParam, SamaritanUniversalParams, SamaritanVerifierParam},
         SamaritanPCS, SamaritanProof,

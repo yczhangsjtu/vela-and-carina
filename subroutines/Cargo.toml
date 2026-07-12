@@ -44,6 +44,11 @@ name = "pcs-single-verify-benches"
 path = "benches/pcs_single_verify_bench.rs"
 harness = false
 
+[[bench]]
+name = "recipcs-benches"
+path = "benches/recipcs_bench.rs"
+harness = false
+
 [features]
 # default = [ "parallel", "print-trace" ]
 default = ["parallel"]
