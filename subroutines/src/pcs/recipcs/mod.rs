@@ -234,29 +234,12 @@ fn new_transcript<E: Pairing>(
 /// length 2N-1 (index i + (N-1) holds the coefficient of X^i, i in
 /// -(N-1)..(N-1)), by mu structured right-shifts. O(N*mu) field operations,
 /// FFT-free.
+///
+/// Thin wrapper over the shared [`crate::pcs::laurent`] kernel so the
+/// reciprocal formula lives in exactly one place (also used by the Mercury
+/// backend).
 fn compute_laurent_h<F: Field>(coeffs: &[F], mu: usize, r: &[F]) -> Vec<F> {
-    let n = 1usize << mu;
-    let offset = n - 1;
-    let len = 2 * n - 1;
-    let mut h = vec![F::zero(); len];
-    h[offset..(offset + n)].copy_from_slice(&coeffs[..n]);
-    for (k, &rk) in r.iter().enumerate().take(mu) {
-        let s = 1usize << k;
-        let omrk = F::one() - rk;
-        let mut new_h = vec![F::zero(); len];
-        for i in 0..len {
-            let val = h[i];
-            if val.is_zero() {
-                continue;
-            }
-            new_h[i] += omrk * val;
-            if i >= s {
-                new_h[i - s] += rk * val;
-            }
-        }
-        h = new_h;
-    }
-    h
+    crate::pcs::laurent::mul_by_reciprocal_tensor(coeffs, mu, r)
 }
 
 /// hbar_i = L_{i+1} = h_{i+1} + h_{-(i+1)}, i = 0..N-2. Length N-1, degree N-2.

@@ -13,8 +13,8 @@ use criterion::{
 use std::{env, time::Duration};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS, SamaritanPCS,
-        ZeromorphPCS,
+        GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS,
+        SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -22,7 +22,7 @@ use subroutines::pcs::{
 type E = Bls12_381;
 
 const DEFAULT_NV_RANGE: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
-const ALL_BACKENDS: [&str; 7] = [
+const ALL_BACKENDS: [&str; 8] = [
     "mkzg",
     "gemini",
     "mulcs",
@@ -30,6 +30,7 @@ const ALL_BACKENDS: [&str; 7] = [
     "zeromorph",
     "recipcs",
     "nrg",
+    "mercury",
 ];
 
 /// Parse `PCS_VERIFY_NV_RANGE` (comma separated), default 8..=20 step 2.
@@ -193,6 +194,7 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
                 "nrg" => {
                     bench_backend::<NestedGridKzgPCS<E>>(&mut group, &mut rng, "NestedGridKZG", nv)
                 },
+                "mercury" => bench_backend::<MercuryPCS<E>>(&mut group, &mut rng, "Mercury", nv),
                 other => panic!("unreachable backend {other}"),
             }
             .unwrap_or_else(|e| {

@@ -22,7 +22,9 @@ mod tests {
     use std::{env, time::Instant};
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{
+                MercuryPCS, MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS,
+            },
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -37,6 +39,7 @@ mod tests {
         "recipcs",
         "zeromorph",
         "samaritan",
+        "mercury",
         "both",
         "all",
     ];
@@ -389,6 +392,69 @@ mod tests {
         Ok(())
     }
 
+    fn bench_mercury(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
+        let mut rng = test_rng();
+        let n = 1 << nv;
+        let gate = CustomizedGates::vanilla_plonk_gate();
+        let circuit = MockCircuit::<FrType>::new(n, &gate);
+        assert!(circuit.is_satisfied());
+
+        for r in 0..repeat {
+            let t0 = Instant::now();
+            let srs = MercuryPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Mercury", nv, n, r, "srs_gen", srs_ms, 1, "");
+
+            let t0 = Instant::now();
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, MercuryPCS<E>>>::preprocess(
+                &circuit.index,
+                &srs,
+            )?;
+            let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row(
+                "top_level",
+                "Mercury",
+                nv,
+                n,
+                r,
+                "preprocess",
+                prep_ms,
+                1,
+                "",
+            );
+
+            let t0 = Instant::now();
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, MercuryPCS<E>>>::prove(
+                &pk,
+                &circuit.public_inputs,
+                &circuit.witnesses,
+            )?;
+            let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Mercury", nv, n, r, "prove", prove_ms, 1, "");
+
+            let t0 = Instant::now();
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MercuryPCS<E>>>::verify(
+                &vk,
+                &circuit.public_inputs,
+                &proof,
+            )?;
+            let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row(
+                "top_level",
+                "Mercury",
+                nv,
+                n,
+                r,
+                "verify",
+                verify_ms,
+                1,
+                if ok { "pass" } else { "FAIL" },
+            );
+            assert!(ok, "Mercury verify failed at nv={nv} r={r}");
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "profile: run with MULCS_PROFILE=1 NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk --release --test mulcs_profile -- --ignored --nocapture"]
     fn bench_mulcs_profile() -> Result<(), HyperPlonkErrors> {
@@ -427,6 +493,10 @@ mod tests {
             if backend == "samaritan" || backend == "all" {
                 println!("# --- Samaritan nv={nv} N={n} ---");
                 bench_samaritan(nv, repeat)?;
+            }
+            if backend == "mercury" || backend == "all" {
+                println!("# --- Mercury nv={nv} N={n} ---");
+                bench_mercury(nv, repeat)?;
             }
         }
         Ok(())

@@ -54,6 +54,11 @@ name = "nested-grid-kzg-benches"
 path = "benches/nested_grid_kzg_bench.rs"
 harness = false
 
+[[bench]]
+name = "mercury-benches"
+path = "benches/mercury_bench.rs"
+harness = false
+
 [features]
 # default = [ "parallel", "print-trace" ]
 default = ["parallel"]

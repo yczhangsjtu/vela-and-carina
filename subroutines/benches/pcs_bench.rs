@@ -8,15 +8,15 @@ use ark_std::{sync::Arc, test_rng};
 use std::{env, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS, SamaritanPCS,
-        ZeromorphPCS,
+        GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS,
+        SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
 const VERIFY_REPETITIONS: usize = 100;
-const ALL_BACKENDS: [&str; 7] = [
+const ALL_BACKENDS: [&str; 8] = [
     "mkzg",
     "gemini",
     "mulcs",
@@ -24,6 +24,7 @@ const ALL_BACKENDS: [&str; 7] = [
     "zeromorph",
     "recipcs",
     "nrg",
+    "mercury",
 ];
 
 fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
@@ -88,7 +89,7 @@ fn parse_backends() -> Result<Vec<String>, PCSError> {
         Ok(vec![canonical])
     } else {
         Err(PCSError::InvalidParameters(format!(
-            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, samaritan, zeromorph, recipcs, nrg, or all"
+            "PCS_BENCH_BACKEND: unsupported backend '{raw}'; use mkzg, gemini, mulcs, samaritan, zeromorph, recipcs, nrg, mercury, or all"
         )))
     }
 }
@@ -120,6 +121,7 @@ fn bench_all() -> Result<(), PCSError> {
                 "nrg" => {
                     bench_backend::<NestedGridKzgPCS<Bls12_381>>(&mut rng, "NestedGridKZG", nv)?
                 },
+                "mercury" => bench_backend::<MercuryPCS<Bls12_381>>(&mut rng, "Mercury", nv)?,
                 _ => unreachable!("parse_backends validates values"),
             }
         }

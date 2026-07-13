@@ -11,6 +11,10 @@ pub use crate::pcs::{
         srs::{GeminiProverParam, GeminiUniversalParams, GeminiVerifierParam},
         GeminiPCS, GeminiProof,
     },
+    mercury::{
+        srs::{MercuryProverParam, MercuryUniversalParams, MercuryVerifierParam},
+        MercuryPCS, MercuryProof,
+    },
     mulcs::{
         srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
         MulcsPCS, MulcsProof, MulcsSymmetricPCS, MulcsSymmetricProof,

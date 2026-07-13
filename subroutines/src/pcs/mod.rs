@@ -6,6 +6,8 @@
 
 mod errors;
 mod gemini;
+mod laurent;
+mod mercury;
 mod mulcs;
 mod multilinear_kzg;
 mod nested_grid_kzg;
