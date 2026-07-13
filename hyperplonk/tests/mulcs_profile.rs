@@ -23,7 +23,8 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                MercuryPCS, MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS,
+                ChopinPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS,
+                ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -40,6 +41,7 @@ mod tests {
         "zeromorph",
         "samaritan",
         "mercury",
+        "chopin",
         "both",
         "all",
     ];
@@ -455,6 +457,59 @@ mod tests {
         Ok(())
     }
 
+    fn bench_chopin(nv: usize, repeat: usize) -> Result<(), HyperPlonkErrors> {
+        let mut rng = test_rng();
+        let n = 1 << nv;
+        let gate = CustomizedGates::vanilla_plonk_gate();
+        let circuit = MockCircuit::<FrType>::new(n, &gate);
+        assert!(circuit.is_satisfied());
+
+        for r in 0..repeat {
+            let t0 = Instant::now();
+            let srs = ChopinPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Chopin", nv, n, r, "srs_gen", srs_ms, 1, "");
+
+            let t0 = Instant::now();
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::preprocess(
+                &circuit.index,
+                &srs,
+            )?;
+            let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Chopin", nv, n, r, "preprocess", prep_ms, 1, "");
+
+            let t0 = Instant::now();
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::prove(
+                &pk,
+                &circuit.public_inputs,
+                &circuit.witnesses,
+            )?;
+            let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row("top_level", "Chopin", nv, n, r, "prove", prove_ms, 1, "");
+
+            let t0 = Instant::now();
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::verify(
+                &vk,
+                &circuit.public_inputs,
+                &proof,
+            )?;
+            let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            print_csv_row(
+                "top_level",
+                "Chopin",
+                nv,
+                n,
+                r,
+                "verify",
+                verify_ms,
+                1,
+                if ok { "pass" } else { "FAIL" },
+            );
+            assert!(ok, "Chopin verify failed at nv={nv} r={r}");
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "profile: run with MULCS_PROFILE=1 NV_RANGE=8,10,12 BACKEND=mulcs cargo test -p hyperplonk --release --test mulcs_profile -- --ignored --nocapture"]
     fn bench_mulcs_profile() -> Result<(), HyperPlonkErrors> {
@@ -497,6 +552,10 @@ mod tests {
             if backend == "mercury" || backend == "all" {
                 println!("# --- Mercury nv={nv} N={n} ---");
                 bench_mercury(nv, repeat)?;
+            }
+            if backend == "chopin" || backend == "all" {
+                println!("# --- Chopin nv={nv} N={n} ---");
+                bench_chopin(nv, repeat)?;
             }
         }
         Ok(())

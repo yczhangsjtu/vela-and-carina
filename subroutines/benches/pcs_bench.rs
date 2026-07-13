@@ -8,15 +8,15 @@ use ark_std::{sync::Arc, test_rng};
 use std::{env, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError, ReciPCS,
-        SamaritanPCS, ZeromorphPCS,
+        ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
+        ReciPCS, SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
 
 const DEFAULT_NV_LIST: [usize; 7] = [8, 10, 12, 14, 16, 18, 20];
 const VERIFY_REPETITIONS: usize = 100;
-const ALL_BACKENDS: [&str; 8] = [
+const ALL_BACKENDS: [&str; 9] = [
     "mkzg",
     "gemini",
     "mulcs",
@@ -25,6 +25,7 @@ const ALL_BACKENDS: [&str; 8] = [
     "recipcs",
     "nrg",
     "mercury",
+    "chopin",
 ];
 
 fn parse_nv_list() -> Result<Vec<usize>, PCSError> {
@@ -136,6 +137,7 @@ fn bench_all() -> Result<(), PCSError> {
                     bench_backend::<NestedGridKzgPCS<Bls12_381>>(&mut rng, "NestedGridKZG", nv)?
                 },
                 "mercury" => bench_backend::<MercuryPCS<Bls12_381>>(&mut rng, "Mercury", nv)?,
+                "chopin" => bench_backend::<ChopinPCS<Bls12_381>>(&mut rng, "Chopin", nv)?,
                 _ => unreachable!("parse_backends validates values"),
             }
         }

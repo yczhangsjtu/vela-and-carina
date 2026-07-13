@@ -59,6 +59,11 @@ name = "mercury-benches"
 path = "benches/mercury_bench.rs"
 harness = false
 
+[[bench]]
+name = "chopin-benches"
+path = "benches/chopin_bench.rs"
+harness = false
+
 [features]
 # default = [ "parallel", "print-trace" ]
 default = ["parallel"]

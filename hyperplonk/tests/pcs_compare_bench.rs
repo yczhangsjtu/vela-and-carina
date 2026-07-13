@@ -31,8 +31,8 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS,
-                SamaritanPCS, ZeromorphPCS,
+                ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS,
+                ReciPCS, SamaritanPCS, ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -61,6 +61,7 @@ mod tests {
         "Gemini",
         "NestedGridKZG",
         "Mercury",
+        "Chopin",
     ];
 
     fn selected_backends() -> Vec<&'static str> {
@@ -79,6 +80,7 @@ mod tests {
             "gemini" => vec!["Gemini"],
             "nrg" | "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => vec!["NestedGridKZG"],
             "mercury" => vec!["Mercury"],
+            "chopin" => vec!["Chopin"],
             _ => panic!(
                 "unknown BACKEND '{raw}'. Supported: mKZG, Mulcs, ReciPCS, Zeromorph, Samaritan, Gemini, NestedGridKZG (nrg), Mercury, all"
             ),
@@ -350,6 +352,39 @@ mod tests {
 
                 let t0 = Instant::now();
                 let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, MercuryPCS<E>>>::verify(
+                    &vk,
+                    &circuit.public_inputs,
+                    &proof,
+                )?;
+                let verify_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                assert!(ok);
+                println!("top_level,{backend},{nv},{size},0,srs_gen,{srs_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,preprocess,{prep_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,prove,{prove_ms:.6},1,");
+                println!("top_level,{backend},{nv},{size},0,verify,{verify_ms:.6},1,pass");
+            },
+            "Chopin" => {
+                let t0 = Instant::now();
+                let srs = ChopinPCS::<E>::gen_srs_for_testing(&mut rng, nv)?;
+                let srs_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::preprocess(
+                    &circuit.index,
+                    &srs,
+                )?;
+                let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::prove(
+                    &pk,
+                    &circuit.public_inputs,
+                    &circuit.witnesses,
+                )?;
+                let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+                let t0 = Instant::now();
+                let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::verify(
                     &vk,
                     &circuit.public_inputs,
                     &proof,

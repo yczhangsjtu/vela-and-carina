@@ -37,6 +37,10 @@ pub use crate::pcs::{
         SamaritanPCS, SamaritanProof,
     },
     structs::Commitment,
+    chopin::{
+        srs::{ChopinProverParam, ChopinUniversalParams, ChopinVerifierParam},
+        ChopinPCS, ChopinProof,
+    },
     univariate_kzg::{
         srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam},
         UnivariateKzgBatchProof, UnivariateKzgPCS, UnivariateKzgProof,
