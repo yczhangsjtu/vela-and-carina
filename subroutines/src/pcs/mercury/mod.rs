@@ -360,17 +360,13 @@ fn new_transcript<E: Pairing>(
 }
 
 // ════════════════════════════════════════════════════════════════════
-// Univariate helpers (FFT-free)
+// Univariate helpers (FFT-free) — thin re-exports from the shared bdfg module
 // ════════════════════════════════════════════════════════════════════
 
-/// Horner evaluation of a coefficient vector.
-fn poly_eval<F: Field>(coeffs: &[F], x: F) -> F {
-    let mut acc = F::zero();
-    for c in coeffs.iter().rev() {
-        acc = acc * x + *c;
-    }
-    acc
-}
+use crate::pcs::bdfg::{
+    add_scaled, divide_by_linear, lagrange_interpolate, mul_by_linear, poly_eval, poly_sub,
+    subtract_const,
+};
 
 /// `P_u(x) = prod_{k<u.len()} (u_k x^{2^k} + (1-u_k))`, so `[X^i] P_u =
 /// eq(i,u)` (little-endian). `O(|u|)` field ops.
@@ -387,78 +383,17 @@ fn pu_eval<F: Field>(u: &[F], x: F) -> F {
 }
 
 /// Divide `p(X)` by `(X - root)`, returning `(quotient, remainder = p(root))`.
-fn divide_by_linear<F: Field>(coeffs: &[F], root: F) -> (Vec<F>, F) {
-    if coeffs.is_empty() {
-        return (Vec::new(), F::zero());
-    }
-    let n = coeffs.len();
-    if n == 1 {
-        return (Vec::new(), coeffs[0]);
-    }
-    let mut q = vec![F::zero(); n - 1];
-    let mut carry = F::zero();
-    for i in (0..n - 1).rev() {
-        let c = coeffs[i + 1] + root * carry;
-        q[i] = c;
-        carry = c;
-    }
-    let rem = coeffs[0] + root * carry;
-    (q, rem)
-}
+/// re-exported from bdfg
 
 /// `p(X) <- p(X) * (X - root)` (returns a new vector one longer).
-fn mul_by_linear<F: Field>(coeffs: &[F], root: F) -> Vec<F> {
-    let mut out = vec![F::zero(); coeffs.len() + 1];
-    for (i, &c) in coeffs.iter().enumerate() {
-        out[i + 1] += c;
-        out[i] -= root * c;
-    }
-    out
-}
+/// re-exported from bdfg
 
 /// `dst[i] += scale * src[i]` (grows `dst` as needed).
-fn add_scaled<F: Field>(dst: &mut Vec<F>, src: &[F], scale: F) {
-    if scale.is_zero() {
-        return;
-    }
-    if dst.len() < src.len() {
-        dst.resize(src.len(), F::zero());
-    }
-    for (i, &c) in src.iter().enumerate() {
-        dst[i] += scale * c;
-    }
-}
+/// re-exported from bdfg
 
 /// Lagrange interpolation through `(xs[i], ys[i])`; `xs` must be pairwise
 /// distinct. Supports the small (1..=3) point sets used by BDFG20.
-fn lagrange_interpolate<F: Field>(xs: &[F], ys: &[F]) -> Result<Vec<F>, PCSError> {
-    let n = xs.len();
-    if n != ys.len() || n == 0 {
-        return Err(PCSError::InvalidProof(
-            "interpolation length mismatch".to_string(),
-        ));
-    }
-    let mut coeffs = vec![F::zero(); n];
-    for i in 0..n {
-        let mut num = vec![F::one()];
-        let mut denom = F::one();
-        for j in 0..n {
-            if j == i {
-                continue;
-            }
-            num = mul_by_linear(&num, xs[j]);
-            denom *= xs[i] - xs[j];
-        }
-        let inv = denom
-            .inverse()
-            .ok_or_else(|| PCSError::InvalidProof("duplicate interpolation nodes".to_string()))?;
-        let scale = ys[i] * inv;
-        for (k, &c) in num.iter().enumerate() {
-            coeffs[k] += scale * c;
-        }
-    }
-    Ok(coeffs)
-}
+/// re-exported from bdfg
 
 /// `h(X)` column: `h_j = sum_{i<b} coeffs[i + j*b] * eq_col[i]`, `j < b_row`.
 /// `O(N)` field ops. Result padded to length `b`.
@@ -1042,26 +977,7 @@ fn bdfg_prove<E: Pairing>(
     Ok((comm_w, comm_w_prime))
 }
 
-/// `p - q` (coefficient-wise, result length `max`).
-fn poly_sub<F: Field>(p: &[F], q: &[F]) -> Vec<F> {
-    let mut out = p.to_vec();
-    if out.len() < q.len() {
-        out.resize(q.len(), F::zero());
-    }
-    for (i, &c) in q.iter().enumerate() {
-        out[i] -= c;
-    }
-    out
-}
-
-/// `dst[0] -= c` (grows `dst` if empty).
-fn subtract_const<F: Field>(dst: &mut Vec<F>, c: F) {
-    if dst.is_empty() {
-        dst.push(-c);
-    } else {
-        dst[0] -= c;
-    }
-}
+// poly_sub, subtract_const re-exported from crate::pcs::bdfg
 
 // ════════════════════════════════════════════════════════════════════
 // Verifier core

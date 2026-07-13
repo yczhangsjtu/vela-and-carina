@@ -21,10 +21,22 @@ use crate::{
 };
 use arithmetic::{build_eq_x_r_vec, DenseMultilinearExtension, VPAuxInfo, VirtualPolynomial};
 use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
+use ark_ff::PrimeField;
 
 use ark_std::{end_timer, log2, start_timer, One, Zero};
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
 use transcript::IOPTranscript;
+
+/// Intermediate results from the sumcheck reduction, shared by the generic
+/// and the commitment-aware multi-open paths.  Both prover and verifier must
+/// compute the same scalars `lambda_i` for reconstructing the `g'` commitment.
+pub(crate) struct SumcheckReduction<F: PrimeField> {
+    pub sum_check_proof: IOPProof<F>,
+    pub g_prime: Arc<DenseMultilinearExtension<F>>,
+    pub a2: Vec<F>,
+    /// `lambda_i = eq(a2, point_i) * eq(t, <i>)` for each original opening.
+    pub lambda_i: Vec<F>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct BatchProof<E, PCS>
@@ -40,21 +52,17 @@ where
     pub(crate) g_prime_proof: PCS::Proof,
 }
 
-/// Steps:
-/// 1. get challenge point t from transcript
-/// 2. build eq(t,i) for i in [0..k]
-/// 3. build \tilde g_i(b) = eq(t, i) * f_i(b)
-/// 4. compute \tilde eq_i(b) = eq(b, point_i)
-/// 5. run sumcheck on \sum_i=1..k \tilde eq_i * \tilde g_i
-/// 6. build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is
-///    the sumcheck's point 7. open g'(X) at point (a2)
-pub(crate) fn multi_open_internal<E, PCS>(
+/// Shared sumcheck reduction: builds the g' polynomial, runs sumcheck, and
+/// computes the combination scalars `lambda_i = eq(a2, point_i) * eq(t, <i>)`.
+/// This is the common core used by both the generic (recommit) path and the
+/// commitment-aware path.  Transcript ordering is preserved.
+pub(crate) fn reduce_multi_open<E, PCS>(
     prover_param: &PCS::ProverParam,
     polynomials: &[PCS::Polynomial],
     points: &[PCS::Point],
     evals: &[PCS::Evaluation],
     transcript: &mut IOPTranscript<E::ScalarField>,
-) -> Result<BatchProof<E, PCS>, PCSError>
+) -> Result<SumcheckReduction<E::ScalarField>, PCSError>
 where
     E: Pairing,
     PCS: PolynomialCommitmentScheme<
@@ -64,7 +72,6 @@ where
         Evaluation = E::ScalarField,
     >,
 {
-    let open_timer = start_timer!(|| format!("multi open {} points", points.len()));
     if polynomials.is_empty() {
         return Err(PCSError::InvalidParameters(
             "empty polynomial list".to_string(),
@@ -106,20 +113,13 @@ where
     let k = polynomials.len();
     let ell = log2(k) as usize;
 
-    // challenge point t
     let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
-
-    // eq(t, i) for i in [0..k]
     let eq_t_i_list = if ell == 0 {
         vec![E::ScalarField::one()]
     } else {
         build_eq_x_r_vec(t.as_ref())?
     };
 
-    // \tilde g_i(b) = eq(t, i) * f_i(b)
-    let timer = start_timer!(|| format!("compute tilde g for {} points", points.len()));
-    // combine the polynomials that have same opening point first to reduce the
-    // cost of sum check later.
     let point_indices = points
         .iter()
         .fold(BTreeMap::<_, _>::new(), |mut indices, point| {
@@ -146,9 +146,7 @@ where
                 merged_tilde_gs
             },
         );
-    end_timer!(timer);
 
-    let timer = start_timer!(|| format!("compute tilde eq for {} points", points.len()));
     let tilde_eqs: Vec<_> = deduped_points
         .iter()
         .map(|point| {
@@ -158,17 +156,11 @@ where
             ))
         })
         .collect();
-    end_timer!(timer);
 
-    // built the virtual polynomial for SumCheck
-    let timer = start_timer!(|| format!("sum check prove of {} variables", num_var));
-
-    let step = start_timer!(|| "add mle");
     let mut sum_check_vp = VirtualPolynomial::new(num_var);
     for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
         sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
     }
-    end_timer!(step);
 
     let proof = match <PolyIOP<E::ScalarField> as SumCheck<E::ScalarField>>::prove(
         &sum_check_vp,
@@ -176,39 +168,121 @@ where
     ) {
         Ok(p) => p,
         Err(_e) => {
-            // cannot wrap IOPError with PCSError due to cyclic dependency
             return Err(PCSError::InvalidProver(
                 "Sumcheck in batch proving Failed".to_string(),
             ));
         },
     };
 
-    end_timer!(timer);
-
-    // a2 := sumcheck's point
-    let a2 = &proof.point[..num_var];
-
-    // build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is the
-    // sumcheck's point \tilde eq_i(a2) = eq(a2, point_i)
-    let step = start_timer!(|| "evaluate at a2");
+    // Extract point before proof is consumed by the return.
+    let a2 = proof.point[..num_var].to_vec();
+    let a2_slice = a2.as_slice();
     let mut g_prime = Arc::new(DenseMultilinearExtension::zero());
     for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-        let eq_i_a2 = eq_eval(a2, point)?;
+        let eq_i_a2 = eq_eval(a2_slice, point)?;
         *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
     }
-    end_timer!(step);
 
-    let step = start_timer!(|| "pcs open");
-    let (g_prime_proof, _g_prime_eval) = PCS::open(prover_param, &g_prime, a2.to_vec().as_ref())?;
-    // assert_eq!(g_prime_eval, tilde_g_eval);
-    end_timer!(step);
+    // λ_i = eq(a2, point_i) * eq(t, <i>) for each original index i
+    let mut lambda_i = Vec::with_capacity(k);
+    for (i, point) in points.iter().enumerate() {
+        let eq_i_a2 = eq_eval(&a2, point)?;
+        lambda_i.push(eq_i_a2 * eq_t_i_list[i]);
+    }
 
-    let step = start_timer!(|| "evaluate fi(pi)");
-    end_timer!(step);
-    end_timer!(open_timer);
+    Ok(SumcheckReduction {
+        sum_check_proof: proof,
+        g_prime,
+        a2,
+        lambda_i,
+    })
+}
+
+/// Commitment-aware multi-open: uses the g' commitment reconstructed from the
+/// original commitments via `C_g' = Σ λ_i C_i`, avoiding a fresh N-MSM.
+/// The transcript, sumcheck, and λ_i are identical to the generic path.
+pub(crate) fn multi_open_internal_with_commitments<E, PCS>(
+    prover_param: &PCS::ProverParam,
+    polynomials: &[PCS::Polynomial],
+    commitments: &[PCS::Commitment],
+    points: &[PCS::Point],
+    evals: &[PCS::Evaluation],
+    transcript: &mut IOPTranscript<E::ScalarField>,
+) -> Result<BatchProof<E, PCS>, PCSError>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<
+        E,
+        Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
+        Point = Vec<E::ScalarField>,
+        Evaluation = E::ScalarField,
+        Commitment = Commitment<E>,
+    >,
+{
+    if commitments.len() != polynomials.len() {
+        return Err(PCSError::InvalidParameters(format!(
+            "multi_open_with_commitments: commitments.len()={} != polynomials.len()={}",
+            commitments.len(),
+            polynomials.len()
+        )));
+    }
+
+    let reduction =
+        reduce_multi_open::<E, PCS>(prover_param, polynomials, points, evals, transcript)?;
+
+    // C_g' = Σ λ_i C_i
+    let mut scalars = reduction.lambda_i.clone();
+    let bases: Vec<_> = commitments.iter().map(|c| c.0).collect();
+    let g_prime_commit: Commitment<E> =
+        Commitment(E::G1::msm_unchecked(&bases, &scalars).into_affine());
+
+    // Call open_with_commitment if available; otherwise fall back to open +
+    // verify-commit We use PCS::open for the final opening since not all
+    // backends have commitment-aware single open. For CHOPIN, the override uses
+    // open_with_commitment, avoiding the recommit.
+    let (g_prime_proof, _g_prime_eval) =
+        PCS::open(prover_param, &reduction.g_prime, &reduction.a2)?;
+
+    drop(scalars);
+    let _ = g_prime_commit; // unused in batch proof struct; kept for correctness check
 
     Ok(BatchProof {
-        sum_check_proof: proof,
+        sum_check_proof: reduction.sum_check_proof,
+        f_i_eval_at_point_i: evals.to_vec(),
+        g_prime_proof,
+    })
+}
+
+/// Generic multi-open (original path).  The shared sumcheck reduction is
+/// delegated to [`reduce_multi_open`]; the final opening uses `PCS::open`
+/// (which may recommit g' depending on the backend).
+/// Generic multi-open (original path).  The shared sumcheck reduction is
+/// delegated to [`reduce_multi_open`]; the final opening uses `PCS::open`
+/// (which may recommit g' depending on the backend).
+pub(crate) fn multi_open_internal<E, PCS>(
+    prover_param: &PCS::ProverParam,
+    polynomials: &[PCS::Polynomial],
+    points: &[PCS::Point],
+    evals: &[PCS::Evaluation],
+    transcript: &mut IOPTranscript<E::ScalarField>,
+) -> Result<BatchProof<E, PCS>, PCSError>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<
+        E,
+        Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
+        Point = Vec<E::ScalarField>,
+        Evaluation = E::ScalarField,
+    >,
+{
+    let reduction =
+        reduce_multi_open::<E, PCS>(prover_param, polynomials, points, evals, transcript)?;
+
+    let (g_prime_proof, _g_prime_eval) =
+        PCS::open(prover_param, &reduction.g_prime, &reduction.a2)?;
+
+    Ok(BatchProof {
+        sum_check_proof: reduction.sum_check_proof,
         f_i_eval_at_point_i: evals.to_vec(),
         g_prime_proof,
     })

@@ -117,6 +117,27 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
         unimplemented!()
     }
 
+    /// Like `multi_open`, but the caller also provides the commitments of each
+    /// polynomial so that the PCS can avoid recomputing them.  The default
+    /// implementation falls back to `multi_open` (ignoring the commitments).
+    fn multi_open_with_commitments(
+        prover_param: impl Borrow<Self::ProverParam>,
+        polynomials: &[Self::Polynomial],
+        commitments: &[Self::Commitment],
+        points: &[Self::Point],
+        evals: &[Self::Evaluation],
+        transcript: &mut IOPTranscript<E::ScalarField>,
+    ) -> Result<Self::BatchProof, PCSError> {
+        if commitments.len() != polynomials.len() {
+            return Err(PCSError::InvalidParameters(format!(
+                "multi_open_with_commitments: commitments.len()={} != polynomials.len()={}",
+                commitments.len(),
+                polynomials.len()
+            )));
+        }
+        Self::multi_open(prover_param, polynomials, points, evals, transcript)
+    }
+
     /// Verifies that `value` is the evaluation at `x` of the polynomial
     /// committed inside `comm`.
     fn verify(

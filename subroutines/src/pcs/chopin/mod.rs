@@ -7,15 +7,16 @@
 //! Proof = 7 G1 + 7 scalars + `mu` metadata (560 + 4 bytes on BLS12-381).
 //!
 //! See `docs/hyperplonk_chopin_design.md` for the full mapping to the paper.
-
 use crate::pcs::{
     bdfg::{
-        bdfg_first_round, bdfg_second_round, bdfg_verifier_combination,
-        poly_eval, BdfgClaim,
+        bdfg_first_round, bdfg_second_round, bdfg_verifier_combination, poly_eval, BdfgClaim,
         BdfgVerifierCombination,
     },
     laurent::{laurent_offset, mul_by_reciprocal_tensor},
-    multilinear_kzg::batching::{batch_verify_internal, multi_open_internal, BatchProof},
+    multilinear_kzg::batching::{
+        batch_verify_internal, multi_open_internal, multi_open_internal_with_commitments,
+        BatchProof,
+    },
     prelude::{Commitment, PCSError},
     profile::ScopedTimer,
     PolynomialCommitmentScheme, StructuredReferenceString,
@@ -26,20 +27,18 @@ use ark_ec::{
     scalar_mul::variable_base::VariableBaseMSM,
     AffineRepr, CurveGroup,
 };
-use ark_ff::{Field, PrimeField};
+use ark_ff::{Field, One, PrimeField};
 use ark_poly::MultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{
     borrow::Borrow, format, marker::PhantomData, rand::Rng, string::ToString, sync::Arc, vec,
-    vec::Vec, One, Zero,
+    vec::Vec, Zero,
 };
 use transcript::IOPTranscript;
 
 pub mod srs;
 
-use srs::{
-    split_exponents, ChopinProverParam, ChopinUniversalParams, ChopinVerifierParam,
-};
+use srs::{split_exponents, ChopinProverParam, ChopinUniversalParams, ChopinVerifierParam};
 
 const BACKEND: &str = "Chopin";
 const DOMAIN: &[u8] = b"chopin-mlpcs-v1";
@@ -72,6 +71,74 @@ const L_RHO: &[u8] = b"rho";
 const L_W: &[u8] = b"w";
 const L_Z_BDFG: &[u8] = b"z";
 const L_WP: &[u8] = b"wp";
+
+/// Exact MSM lengths (coefficient-vector sizes) for all commitments in a
+/// CHOPIN opening at a given `nv`.  These match the actual lengths returned by
+/// `bdfg_first_round().quot_m.len()` and `bdfg_second_round().quot_l.len()`.
+///
+/// The W and W' formulas are deterministic given the claim-set cardinalities
+/// (independent of random polynomial content — the BDFG algebra never
+/// introduces cancellation that shortens the quotient below its analytic
+/// bound).
+///
+/// Derived from `bdfg_first_round` with CHOPIN claims:
+/// - f_zR at {α,β,β⁻¹} (3 pts, |Z_{T\S}|=0)
+/// - f_α at {β,β⁻¹} (2 pts, |Z_{T\S}|=1)
+/// - S at {β,β⁻¹} (2 pts, |Z_{T\S}|=1)
+/// Union T = {α,β,β⁻¹}, |Z_T| = 3.
+///
+/// Even nv (M_L = M_R = M):
+///   max deg(m) = max(M-1+0, M-1+1, M-2+1) = M
+///   W: deg ≤ M-3, length = max(0, M-2)
+///   W': deg ≤ M-2, length = M-1
+///
+/// Odd nv (M_L = 2·M_R):
+///   max deg(m) = max(M_L-1+0, M_R-1+1, M_L-2+1) = M_L-1
+///   W: deg ≤ M_L-4, length = max(0, M_L-3)
+///   W': deg ≤ M_L-2, length = M_L-1
+///
+/// Boundary nv=2 (M_L=M_R=2): W has length 0 (the quotient is empty).
+pub struct ChopinMsmLengths {
+    pub q1_len: usize,
+    pub q2_len: usize,
+    pub c0_len: usize,
+    pub c1_len: usize,
+    pub cs_len: usize,
+    pub w_len: usize,
+    pub wp_len: usize,
+}
+
+impl ChopinMsmLengths {
+    pub fn for_num_vars(mu: usize) -> Self {
+        let (m_left, m_right) = split_exponents(mu);
+        let ml = 1usize << m_left;
+        let mr = 1usize << m_right;
+
+        let q1_len = (ml - 1) * mr;
+        let q2_len = mr.saturating_sub(1);
+        let c0_len = ml;
+        let c1_len = mr;
+        let cs_len = ml.saturating_sub(1);
+
+        let (w_len, wp_len) = if mu % 2 == 0 {
+            // even nv: M_L = M_R = M. W = M-2, W' = M-1
+            (ml.saturating_sub(2), ml.saturating_sub(1))
+        } else {
+            // odd nv: M_L = 2·M_R. W = M_L-3, W' = M_L-1
+            (ml.saturating_sub(3), ml.saturating_sub(1))
+        };
+
+        ChopinMsmLengths {
+            q1_len,
+            q2_len,
+            c0_len,
+            c1_len,
+            cs_len,
+            w_len,
+            wp_len,
+        }
+    }
+}
 
 /// CHOPIN scheme handle.
 pub struct ChopinPCS<E: Pairing> {
@@ -148,20 +215,44 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ChopinPCS<E> {
                 pp.num_vars, poly.num_vars
             )));
         }
-        // If the key supports more variables than the polynomial, pad
-        // evaluations with zeros to the key's N.
-        let poly_n = 1usize << poly.num_vars;
+        let poly_nv = poly.num_vars;
+        let poly_n = 1usize << poly_nv;
         let pp_n = pp.n();
+        let padded = pp.num_vars > poly_nv;
         let mut evals = poly.to_evaluations();
-        if pp.num_vars > poly.num_vars {
+        if padded {
             evals.resize(pp_n, E::ScalarField::zero());
         }
-        let _t_total = ScopedTimer::new(BACKEND, poly.num_vars, poly_n, "chopin_commit_total", 1, "total");
-        let _t_reorder =
-            ScopedTimer::new(BACKEND, poly.num_vars, poly_n, "chopin_commit_reorder", poly_n, "reorder");
-        let cm = pp.msm_full_reordered(&evals)?;
+        // Profiler uses the actual execution domain (key nv/N/count when padded).
+        let profile_nv = if padded { pp.num_vars } else { poly_nv };
+        let profile_n = if padded { pp_n } else { poly_n };
+        let _t_total = ScopedTimer::new(
+            BACKEND,
+            profile_nv,
+            profile_n,
+            "chopin_commit_total",
+            1,
+            "total",
+        );
+        let _t_reorder = ScopedTimer::new(
+            BACKEND,
+            profile_nv,
+            profile_n,
+            "chopin_commit_reorder",
+            profile_n,
+            "reorder",
+        );
+        let scalars = reorder_full_scalars::<E>(&evals, pp.big_ml(), pp.big_mr());
         drop(_t_reorder);
-        let _t_msm = ScopedTimer::new(BACKEND, poly.num_vars, poly_n, "chopin_commit_msm", poly_n, "N-MSM");
+        let _t_msm = ScopedTimer::new(
+            BACKEND,
+            profile_nv,
+            profile_n,
+            "chopin_commit_msm",
+            profile_n,
+            "N-MSM",
+        );
+        let cm = E::G1::msm_unchecked(&pp.g1_powers[..pp_n], &scalars).into_affine();
         drop(_t_msm);
         Ok(Commitment(cm))
     }
@@ -172,34 +263,30 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ChopinPCS<E> {
         point: &Self::Point,
     ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
         let pp = pp.borrow();
-        let mu = poly.num_vars();
-        let n = 1usize.checked_shl(mu as u32).unwrap_or(0);
-        check_mu(mu)?;
-        if point.len() != mu {
-            return Err(PCSError::InvalidParameters(format!(
-                "point length {} != mu {}",
-                point.len(),
-                mu
-            )));
-        }
-        // trait `open` has no commitment argument; re-commit C_f (an extra
-        // N-MSM). Callers holding C_f should use `open_with_commitment`.
+        let canon = canonicalize_opening_input(pp, poly, point)?;
+        let canon_nv = canon.pad_dims.map_or(poly.num_vars(), |d| d);
+        let canon_n = 1usize << canon_nv;
+        // trait `open` has no commitment argument; re-commit C_f.
         let _t_recommit = ScopedTimer::new(
             BACKEND,
-            mu,
-            n,
+            canon_nv,
+            canon_n,
             "chopin_open_statement_recommit",
-            n,
+            canon_n,
             "recommit-cf",
         );
-        let value = poly
-            .evaluate(point)
-            .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
         let cm_f = ChopinPCS::<E>::commit(pp, poly)?;
         drop(_t_recommit);
-        let mut t = new_transcript::<E>(pp.num_vars, pp.m_left, pp.m_right, &cm_f, point, &value)?;
-        let proof = chopin_core_open(pp, &poly.evaluations, mu, point, &value, &mut t)?;
-        Ok((proof, value))
+        let mut t = new_transcript::<E>(
+            canon_nv,
+            pp.m_left,
+            pp.m_right,
+            &cm_f,
+            &canon.point,
+            &canon.value,
+        )?;
+        let proof = chopin_core_open(pp, &canon.evals[..canon_n], canon_nv, &canon.point, &mut t)?;
+        Ok((proof, canon.value))
     }
 
     fn multi_open(
@@ -216,6 +303,50 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ChopinPCS<E> {
             evals,
             transcript,
         )
+    }
+
+    fn multi_open_with_commitments(
+        prover_param: impl Borrow<Self::ProverParam>,
+        polynomials: &[Self::Polynomial],
+        commitments: &[Self::Commitment],
+        points: &[Self::Point],
+        evals: &[Self::Evaluation],
+        transcript: &mut IOPTranscript<E::ScalarField>,
+    ) -> Result<Self::BatchProof, PCSError> {
+        let pp = prover_param.borrow();
+        if commitments.len() != polynomials.len() {
+            return Err(PCSError::InvalidParameters(format!(
+                "commitments.len()={} != polynomials.len()={}",
+                commitments.len(),
+                polynomials.len()
+            )));
+        }
+
+        use crate::pcs::multilinear_kzg::batching::reduce_multi_open;
+        let reduction = reduce_multi_open::<E, Self>(pp, polynomials, points, evals, transcript)?;
+
+        // C_g' = Σ λ_i C_i — same formula the verifier uses
+        let mut g1_bases = Vec::with_capacity(commitments.len());
+        for c in commitments.iter() {
+            g1_bases.push(c.0);
+        }
+        let g_prime_commit =
+            Commitment(E::G1::msm_unchecked(&g1_bases, &reduction.lambda_i).into_affine());
+        let _g_prime_commit = g_prime_commit; // consumed below
+
+        // Use commitment-aware single open: no N-MSM recommit.
+        let (g_prime_proof, _g_prime_eval) = ChopinPCS::<E>::open_with_commitment(
+            pp,
+            &reduction.g_prime,
+            &reduction.a2,
+            &_g_prime_commit,
+        )?;
+
+        Ok(BatchProof {
+            sum_check_proof: reduction.sum_check_proof,
+            f_i_eval_at_point_i: evals.to_vec(),
+            g_prime_proof,
+        })
     }
 
     fn verify(
@@ -254,21 +385,19 @@ impl<E: Pairing> ChopinPCS<E> {
         point: &[E::ScalarField],
         commitment: &Commitment<E>,
     ) -> Result<(ChopinProof<E>, E::ScalarField), PCSError> {
-        let mu = poly.num_vars();
-        check_mu(mu)?;
-        let value = poly
-            .evaluate(point)
-            .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
-        if point.len() != mu {
-            return Err(PCSError::InvalidParameters(format!(
-                "point length {} != mu {}",
-                point.len(),
-                mu
-            )));
-        }
-        let mut t = new_transcript::<E>(pp.num_vars, pp.m_left, pp.m_right, commitment, point, &value)?;
-        let proof = chopin_core_open(pp, &poly.evaluations, mu, point, &value, &mut t)?;
-        Ok((proof, value))
+        let canon = canonicalize_opening_input(pp, poly, point)?;
+        let canon_nv = canon.pad_dims.map_or(poly.num_vars(), |d| d);
+        let mut t = new_transcript::<E>(
+            canon_nv,
+            pp.m_left,
+            pp.m_right,
+            commitment,
+            &canon.point,
+            &canon.value,
+        )?;
+        let canon_n = 1usize << canon_nv;
+        let proof = chopin_core_open(pp, &canon.evals[..canon_n], canon_nv, &canon.point, &mut t)?;
+        Ok((proof, canon.value))
     }
 }
 
@@ -293,6 +422,96 @@ fn check_mu(mu: usize) -> Result<(), PCSError> {
 
 fn check_mu_verify(mu: usize) -> Result<(), PCSError> {
     check_mu(mu).map_err(|e| PCSError::InvalidProof(e.to_string()))
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Canonical embedding — prover AND verifier MUST agree on this
+// ════════════════════════════════════════════════════════════════════
+
+/// Result of [`canonicalize_opening_input`]. When `pad_dims` is `Some(nv)`,
+/// the key supports more variables than the polynomial and both evals and
+/// point have been padded with trailing zeros to `nv` variables.
+struct CanonicalInput<E: Pairing> {
+    evals: Vec<E::ScalarField>,
+    point: Vec<E::ScalarField>,
+    value: E::ScalarField,
+    /// If `Some(pp_nv)`, padding was applied and `evals`/`point` have length
+    /// `2^pp_nv` / `pp_nv` respectively.
+    pad_dims: Option<usize>,
+}
+
+/// Validate and canonicalize the opening input so that prover and verifier
+/// always work on the same padded representation.
+///
+/// 1. `poly.num_vars >= 2` and `poly.num_vars <= pp.num_vars`.
+/// 2. `point.len() == poly.num_vars`.
+/// 3. Compute `value = poly.evaluate(point)`.
+/// 4. If `pp.num_vars > poly.num_vars`, zero-pad evals to `2^pp.num_vars` and
+///    point to `pp.num_vars` (the extra Boolean variables are fixed at 0).
+/// 5. If `pp.num_vars == poly.num_vars`, return the original data.
+fn canonicalize_opening_input<E: Pairing>(
+    pp: &ChopinProverParam<E>,
+    poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+    point: &[E::ScalarField],
+) -> Result<CanonicalInput<E>, PCSError> {
+    let poly_nv = poly.num_vars();
+    check_mu(poly_nv)?;
+    if pp.num_vars < poly_nv {
+        return Err(PCSError::InvalidParameters(format!(
+            "prover param for {} vars < poly {} vars",
+            pp.num_vars, poly_nv
+        )));
+    }
+    if point.len() != poly_nv {
+        return Err(PCSError::InvalidParameters(format!(
+            "point length {} != mu {}",
+            point.len(),
+            poly_nv
+        )));
+    }
+    let value = poly
+        .evaluate(point)
+        .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
+
+    if pp.num_vars > poly_nv {
+        let pp_n = 1usize << pp.num_vars;
+        let mut evals = poly.to_evaluations();
+        evals.resize(pp_n, E::ScalarField::zero());
+        let mut padded_point = point.to_vec();
+        padded_point.resize(pp.num_vars, E::ScalarField::zero());
+        Ok(CanonicalInput {
+            evals,
+            point: padded_point,
+            value,
+            pad_dims: Some(pp.num_vars),
+        })
+    } else {
+        Ok(CanonicalInput {
+            evals: poly.to_evaluations(),
+            point: point.to_vec(),
+            value,
+            pad_dims: None,
+        })
+    }
+}
+
+/// Verifier-side canonicalization: when the point is shorter than `proof.mu`,
+/// pad with trailing zeros so the verifier sees the same padded point that
+/// the prover bound into the transcript.
+fn canonicalize_point_verify<F: Field>(point: &[F], mu: usize) -> Result<Vec<F>, PCSError> {
+    if point.len() == mu {
+        return Ok(point.to_vec());
+    }
+    if point.len() > mu {
+        return Err(PCSError::InvalidProof(format!(
+            "point length {} > proof.mu {}",
+            point.len(),
+            mu
+        )));
+    }
+    let mut p = point.to_vec();
+    p.resize(mu, F::zero());
+    Ok(p)
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -321,13 +540,9 @@ fn build_eq_vec<F: Field>(u: &[F], b: usize) -> Vec<F> {
     eq
 }
 
-/// Determine if eq points are at valid indices for parallel partitioning in the numeric domain
-fn compute_restriction<F: Field>(
-    evals: &[F],
-    psi_r: &[F],
-    big_ml: usize,
-    big_mr: usize,
-) -> Vec<F> {
+/// Determine if eq points are at valid indices for parallel partitioning in the
+/// numeric domain
+fn compute_restriction<F: Field>(evals: &[F], psi_r: &[F], big_ml: usize, big_mr: usize) -> Vec<F> {
     let mut g = vec![F::zero(); big_ml];
     for j in 0..big_mr {
         let pj = psi_r[j];
@@ -372,10 +587,7 @@ fn divide_x_at_alpha<F: Field>(
 
 /// Divide the univariate `f_alpha(Y)` (degree < M_R) by `(Y - beta)`, returning
 /// `(q2, remainder = f_alpha(beta) = b1)` with `q2` of length `M_R-1`.
-fn divide_y_at_beta<F: Field>(
-    f_alpha: &[F],
-    beta: F,
-) -> Result<(Vec<F>, F), PCSError> {
+fn divide_y_at_beta<F: Field>(f_alpha: &[F], beta: F) -> Result<(Vec<F>, F), PCSError> {
     if f_alpha.is_empty() {
         return Err(PCSError::InvalidProver("empty f_alpha".to_string()));
     }
@@ -393,15 +605,12 @@ fn divide_y_at_beta<F: Field>(
     Ok((q2, b1))
 }
 
-/// Symmetric Lagrange witness: given `coeffs` of length `M = 2^m` and the tensor
-/// point `u` (length `m`), returns `S` of length `M-1` satisfying
-/// `coeffs(X)·ψ_u(1/X) + coeffs(1/X)·ψ_u(X) = 2<coeffs,ψ_u> + X·S(X) + X^{-1}·S(X^{-1})`.
-/// Uses the shared Laurent kernel (`mul_by_reciprocal_tensor`).
-fn symmetric_lagrange_witness<F: Field>(
-    coeffs: &[F],
-    u: &[F],
-    m: usize,
-) -> Vec<F> {
+/// Symmetric Lagrange witness: given `coeffs` of length `M = 2^m` and the
+/// tensor point `u` (length `m`), returns `S` of length `M-1` satisfying
+/// `coeffs(X)·ψ_u(1/X) + coeffs(1/X)·ψ_u(X) = 2<coeffs,ψ_u> + X·S(X) +
+/// X^{-1}·S(X^{-1})`. Uses the shared Laurent kernel
+/// (`mul_by_reciprocal_tensor`).
+fn symmetric_lagrange_witness<F: Field>(coeffs: &[F], u: &[F], m: usize) -> Vec<F> {
     let big_m = 1usize << m;
     debug_assert_eq!(coeffs.len(), big_m, "coeffs length mismatch");
     let buf = mul_by_reciprocal_tensor(coeffs, m, u);
@@ -425,6 +634,24 @@ fn eval_tensor<F: Field>(u: &[F], x: F) -> F {
         }
     }
     res
+}
+
+/// Reorder canonical evaluations `F[i + M_L*j]` into the dominant-q1-first
+/// SRS layout. Pure field work (no MSM); callers profile the MSM separately.
+fn reorder_full_scalars<E: Pairing>(
+    evals: &[E::ScalarField],
+    big_ml: usize,
+    big_mr: usize,
+) -> Vec<E::ScalarField> {
+    let n = big_ml * big_mr;
+    let mut scalars = vec![E::ScalarField::zero(); n];
+    for j in 0..big_mr {
+        let base = big_ml * j;
+        for i in 0..big_ml {
+            scalars[srs::grid_base_index(big_ml, big_mr, i, j)] = evals[base + i];
+        }
+    }
+    scalars
 }
 
 /// Bivariate evaluation `f(α,β) = sum_{i,j} F[i,j] α^i β^j` via nested Horner.
@@ -491,26 +718,8 @@ fn draw_nonzero<F: PrimeField>(
     ))
 }
 
-/// Draw a challenge `c` with `c != 0` and `c^2 != 1`, returning `(c, c^{-1})`.
-fn draw_reciprocal<F: PrimeField>(
-    t: &mut IOPTranscript<F>,
-    label: &'static [u8],
-) -> Result<(F, F), PCSError> {
-    for _ in 0..MAX_CHALLENGE_RETRY {
-        let c = t.get_and_append_challenge(label)?;
-        if !c.is_zero() && c.square() != F::one() {
-            let c_inv = c
-                .inverse()
-                .ok_or_else(|| PCSError::InvalidParameters("inverse failed".to_string()))?;
-            return Ok((c, c_inv));
-        }
-    }
-    Err(PCSError::InvalidParameters(
-        "exhausted retries drawing a reciprocal challenge".to_string(),
-    ))
-}
-
-/// Draw `beta` with the extra constraints `beta != alpha`, `beta^{-1} != alpha`.
+/// Draw `beta` with the extra constraints `beta != alpha`, `beta^{-1} !=
+/// alpha`.
 fn draw_beta<F: PrimeField>(
     t: &mut IOPTranscript<F>,
     label: &'static [u8],
@@ -561,43 +770,18 @@ fn chopin_core_open<E: Pairing>(
     evals: &[E::ScalarField],
     mu: usize,
     point: &[E::ScalarField],
-    _value: &E::ScalarField,
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<ChopinProof<E>, PCSError> {
-    check_mu(mu)?;
-    if pp.num_vars < mu {
-        return Err(PCSError::InvalidParameters(format!(
-            "prover param for {} vars < opening mu {mu}",
-            pp.num_vars
-        )));
-    }
-    // Use the key's dimensions for the protocol. When the key is larger than
-    // the polynomial, pad evaluations and point with zeros.
-    let (m_left, m_right) = split_exponents(pp.num_vars);
+    // All inputs are canonicalized by the caller; this function operates
+    // strictly on the padded SRS domain (mu == pp.num_vars).
+    debug_assert_eq!(mu, pp.num_vars);
+    debug_assert_eq!(evals.len(), pp.n());
+    debug_assert_eq!(point.len(), mu);
+
+    let (m_left, m_right) = split_exponents(mu);
     let big_ml = pp.big_ml();
     let big_mr = pp.big_mr();
     let n = big_ml * big_mr;
-    let mu_key = pp.num_vars;
-
-    // When key is larger than the polynomial, pad evals and point with zeros.
-    let mut evals_padded;
-    let mut point_padded;
-    let (evals, point) = if pp.num_vars > mu {
-        evals_padded = evals.to_vec();
-        evals_padded.resize(n, E::ScalarField::zero());
-        point_padded = point.to_vec();
-        point_padded.resize(mu_key, E::ScalarField::zero());
-        (&evals_padded[..], &point_padded[..])
-    } else {
-        (evals, point)
-    };
-    if evals.len() != n {
-        return Err(PCSError::InvalidParameters(format!(
-            "polynomial has {} evaluations, expected N={}",
-            evals.len(),
-            n
-        )));
-    }
     if pp.g1_powers.len() < n {
         return Err(PCSError::InvalidParameters(format!(
             "SRS G1 length {} insufficient for N={}",
@@ -606,22 +790,27 @@ fn chopin_core_open<E: Pairing>(
         )));
     }
 
-    let _t_total = ScopedTimer::new(BACKEND, mu_key, n, "chopin_open_total", 1, "core-open");
+    let _t_total = ScopedTimer::new(BACKEND, mu, n, "chopin_open_total", 1, "core-open");
 
     let z_l = &point[..m_left];
     let z_r = &point[m_left..];
 
     // ── Psi_R (eq vector for right variables) ──
     let psi_r = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_build_psi_r", big_mr, "eq-vec-r");
+        let _t = ScopedTimer::new(
+            BACKEND,
+            mu,
+            n,
+            "chopin_open_build_psi_r",
+            big_mr,
+            "eq-vec-r",
+        );
         build_eq_vec::<E::ScalarField>(z_r, big_mr)
     };
 
     // ── Step 1: f_zR[i] = sum_j F[i,j] psi_R[j] (column restriction, O(N)) ──
     let f_zr = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_restrict_right", n, "restrict");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_restrict_right", n, "restrict");
         compute_restriction(evals, &psi_r, big_ml, big_mr)
     };
 
@@ -641,8 +830,7 @@ fn chopin_core_open<E: Pairing>(
 
     // ── derive alpha ──
     let alpha = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_alpha", 1, "fs");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_alpha", 1, "fs");
         transcript.get_and_append_challenge(L_ALPHA)?
     };
 
@@ -696,15 +884,13 @@ fn chopin_core_open<E: Pairing>(
 
     // ── derive gamma (batched IPA challenge) ──
     let gamma = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_gamma", 1, "fs");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_gamma", 1, "fs");
         draw_nonzero(transcript, L_GAMMA)?
     };
 
     // ── S witness: S = S0 + gamma·S1 ──
     let s_coeffs = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_build_s", big_ml, "reciprocal");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_build_s", big_ml, "reciprocal");
         let s0 = symmetric_lagrange_witness(&f_zr, z_l, m_left);
         let s1 = symmetric_lagrange_witness(&f_alpha, z_r, m_right);
         let mut s = vec![E::ScalarField::zero(); big_ml - 1];
@@ -733,21 +919,13 @@ fn chopin_core_open<E: Pairing>(
 
     // ── derive beta ──
     let (beta, beta_inv) = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_beta", 1, "fs");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_derive_beta", 1, "fs");
         draw_beta(transcript, L_BETA, alpha)?
     };
 
     // ── evaluations at beta, beta^{-1} ──
     let (a1, a2, b1, b2, s1, s2) = {
-        let _t = ScopedTimer::new(
-            BACKEND,
-            mu,
-            n,
-            "chopin_open_eval_claims",
-            6,
-            "horner-6",
-        );
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_eval_claims", 6, "horner-6");
         let a1 = poly_eval(&f_zr, beta);
         let a2 = poly_eval(&f_zr, beta_inv);
         let b1 = poly_eval(&f_alpha, beta);
@@ -759,8 +937,7 @@ fn chopin_core_open<E: Pairing>(
 
     // ── q2(Y) = (f_alpha(Y) - b1) / (Y - beta) ──
     let (q2_coeffs, _q2_rem) = {
-        let _t =
-            ScopedTimer::new(BACKEND, mu, n, "chopin_open_divide_y", big_mr, "syndiv-Y");
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_divide_y", big_mr, "syndiv-Y");
         divide_y_at_beta(&f_alpha, beta)?
     };
 
@@ -788,8 +965,8 @@ fn chopin_core_open<E: Pairing>(
 
     // ── BDFG20 batch opening of {f_zR, f_alpha, S} at {α,β,β^{-1}} ──
     let (batch_w, batch_w_prime) = bdfg_prove_chopin(
-        pp, mu, n, transcript, &f_zr, &f_alpha, &s_coeffs,
-        alpha, beta, beta_inv, a, a1, a2, b1, b2, s1, s2,
+        pp, mu, n, transcript, &f_zr, &f_alpha, &s_coeffs, alpha, beta, beta_inv, a, a1, a2, b1,
+        b2, s1, s2,
     )?;
 
     Ok(ChopinProof {
@@ -854,14 +1031,7 @@ fn bdfg_prove_chopin<E: Pairing>(
 
     // Round 1
     let first = {
-        let _t = ScopedTimer::new(
-            BACKEND,
-            mu,
-            n,
-            "chopin_open_bdfg_build_w",
-            1,
-            "bdfg-1",
-        );
+        let _t = ScopedTimer::new(BACKEND, mu, n, "chopin_open_bdfg_build_w", 1, "bdfg-1");
         bdfg_first_round(&claims, rho)?
     };
 
@@ -941,23 +1111,8 @@ fn chopin_core_verify<E: Pairing>(
     let n = big_ml
         .checked_mul(big_mr)
         .ok_or_else(|| PCSError::InvalidProof("N overflow".to_string()))?;
-    if point.len() != mu {
-        // When the verifier key supports more variables than the polynomial,
-        // pad the point with zeros (the extra variables are implicitly 0).
-        if point.len() > mu || mu - point.len() > usize::BITS as usize {
-            return Err(PCSError::InvalidProof(format!(
-                "point length {} vs proof.mu {}",
-                point.len(),
-                mu
-            )));
-        }
-        // pad with zeros
-    }
-    let point: Vec<E::ScalarField> = {
-        let mut p = point.to_vec();
-        p.resize(mu, E::ScalarField::zero());
-        p
-    };
+    // Canonicalize the point to the padded domain (same rule the prover used).
+    let point = canonicalize_point_verify(point, mu)?;
 
     let _t_total = ScopedTimer::new(BACKEND, mu, n, "chopin_verify_total", 1, "verify");
 
@@ -984,14 +1139,7 @@ fn chopin_core_verify<E: Pairing>(
     let z_r = &point[m_left..];
 
     // ── IPA identity check ──
-    let _t_ipa = ScopedTimer::new(
-        BACKEND,
-        mu,
-        n,
-        "chopin_verify_ipa_identity",
-        1,
-        "ipa-field",
-    );
+    let _t_ipa = ScopedTimer::new(BACKEND, mu, n, "chopin_verify_ipa_identity", 1, "ipa-field");
     let psi_l_beta = eval_tensor(z_l, beta);
     let psi_l_beta_inv = eval_tensor(z_l, beta_inv);
     let psi_r_beta = eval_tensor(z_r, beta);
@@ -1008,10 +1156,8 @@ fn chopin_core_verify<E: Pairing>(
     // ── bivariate KZG check (3-term multi_pairing) ──
     // dynamic G2 elements
     let _t_g2 = ScopedTimer::new(BACKEND, mu, n, "chopin_verify_g2_scalars", 2, "G2-mul");
-    let tau_minus_alpha =
-        (vp.g2_tau.into_group() - vp.g2_one.into_group() * alpha).into_affine();
-    let sigma_minus_beta =
-        (vp.g2_sigma.into_group() - vp.g2_one.into_group() * beta).into_affine();
+    let tau_minus_alpha = (vp.g2_tau.into_group() - vp.g2_one.into_group() * alpha).into_affine();
+    let sigma_minus_beta = (vp.g2_sigma.into_group() - vp.g2_one.into_group() * beta).into_affine();
     drop(_t_g2);
 
     // C_F - b1·[1]_1
@@ -1045,14 +1191,7 @@ fn chopin_core_verify<E: Pairing>(
     let bdfg_comb = bdfg_chopin_verify_lhs(vp, proof, alpha, beta, beta_inv, rho, z)?;
 
     // C_s = Σ scalars[i]*C_i - const_scalar·[1]_1 - Z_T(z)·W
-    let _t_msm = ScopedTimer::new(
-        BACKEND,
-        mu,
-        n,
-        "chopin_verify_bdfg_msm",
-        6,
-        "6-base-MSM",
-    );
+    let _t_msm = ScopedTimer::new(BACKEND, mu, n, "chopin_verify_bdfg_msm", 6, "6-base-MSM");
     let bases = [
         proof.comm_f_zr,
         proof.comm_f_alpha,
@@ -1081,10 +1220,8 @@ fn chopin_core_verify<E: Pairing>(
         2,
         "2-term",
     );
-    let ok_bdfg = E::multi_pairing(
-        [cs_plus_z_wp, neg_wp],
-        [vp.g2_one, vp.g2_tau],
-    ) == PairingOutput(E::TargetField::one());
+    let ok_bdfg = E::multi_pairing([cs_plus_z_wp, neg_wp], [vp.g2_one, vp.g2_tau])
+        == PairingOutput(E::TargetField::one());
     drop(_t_pair_bdfg);
 
     Ok(ok_bdfg)
@@ -1100,7 +1237,11 @@ fn bdfg_chopin_verify_lhs<E: Pairing>(
     z: E::ScalarField,
 ) -> Result<BdfgVerifierCombination<E::ScalarField>, PCSError> {
     bdfg_verifier_combination(
-        &[&[alpha, beta, beta_inv], &[beta, beta_inv], &[beta, beta_inv]],
+        &[
+            &[alpha, beta, beta_inv],
+            &[beta, beta_inv],
+            &[beta, beta_inv],
+        ],
         &[
             &[proof.a, proof.a1, proof.a2],
             &[proof.b1, proof.b2],

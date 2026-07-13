@@ -263,33 +263,59 @@ a1·psi_L(β^{-1}) + a2·psi_L(β) + γ·( b1·psi_R(β^{-1}) + b2·psi_R(β) )
 
 The paper contains two batch-opening protocols:
 
-* **Figure 6** (BDFG20 original): sends `W`, `W'` (2 G1), verifier does 2 pairing terms.
-  This is what Table 1's `(5+2)G + 7F`, `3+2 pairings` refers to, and what `ChopinPCS`
-  implements together with Figure 5.
-* **Figure 7** (modified, for standard-model extraction): explicitly sends `W` plus two
-  same-point KZG opening proofs (`π^(s)`, `π^(q)`), i.e. a different proof size / pairing
-  count. Implementing Figure 7 verbatim would change the reported `2G`/`2-pairing`
-  overhead.
+* **Figure 6** (BDFG20 original ePrint 2020/081 §4): sends `W`, `W'` (2 G1),
+  and the verifier checks one two-term pairing product. This is the batch proof
+  counted by Table 1's `(5+2)G + 7F`, `3+2 pairings`, and is the batch proof
+  implemented by `ChopinPCS` together with Figure 5. The original BDFG20
+  knowledge-soundness analysis is in the Algebraic Group Model (AGM).
+
+* **Figure 7** (modified, for standard-model extraction): explicitly sends `W`
+  plus two same-point KZG opening proofs (`π^(s)`, `π^(q)`), hence has a
+  different proof size and pairing count. Section 7 proves standard-model
+  knowledge soundness for this modified protocol when batching a constant number
+  of polynomials; it does not establish that result for Figure 6 itself.
 
 Calibration recorded here:
-* `ChopinPCS`'s proof-size / performance numbers correspond to **Figure 6**.
-* We do **not** substitute Figure 7's standard-model soundness conclusion for Figure 6's
-  analysis, and we do **not** claim the code mechanically proves standard-model knowledge
-  soundness. The paper's separate treatment of Figure 6, Figure 7 and Table 1 is recorded
-  as-is.
-* Any Figure-7 variant would be a separate type (`ChopinStandardBatchPCS`) reporting its
-  own proof size and pairing count; it is not a substitute for the canonical `ChopinPCS`
-  and is out of scope for the acceptance criteria here.
+* `ChopinPCS` proof-size / performance numbers correspond to **Figure 5 +
+  Figure 6**.
+* We do **not** claim the code mechanically proves knowledge soundness in any
+  model.  The code is tested for correctness via polynomial identities and
+  random-instance verification, which is an engineering confidence measure,
+  not a formal security proof.
+* The paper's Figure 7 standard-model result is a **separate protocol
+  variant** and is **not** implemented in `ChopinPCS`. It therefore does not
+  establish end-to-end standard-model knowledge soundness for this Figure 5 +
+  Figure 6 backend.
+* If a Figure-7 variant is implemented in the future, it should be a separate
+  type (e.g. `ChopinStandardBatchPCS`) reporting its own proof size and
+  pairing count; it is not a substitute for the canonical `ChopinPCS`.
+* The non-interactive Fiat-Shamir variant used here relies on the Random-Oracle
+  Model (ROM) heuristic. The interactive protocol's statistical soundness bound
+  is not, by itself, a ROM knowledge-soundness theorem.
+
+### Odd-nv rectangular soundness
+
+The paper's Lemma 1 (soundness of the interactive proof, §4.1) is stated and
+proved for the **even** `n = 2m` case.  The rectangular generalisation `mu =
+2m+1` (p.6, "Extensions to an odd number of variables") adapts the dimensions
+(`M_L = 2M_R`) and the soundness bound adjusts to `(M_L + M_R - 2)/|F|`.
+**The paper text describes this adjustment; the rectangular formula is the
+paper's own.** The code handles both even and odd `nv` through the same
+dimensional-split code path; correctness is tested for both even and odd `nv`
+(3,5,7,4,6,8).
 
 ---
 
 ## 11. Security vs engineering calibration
 
-* Statistical soundness of the interactive proof (Fig. 1) is `2(M_L + M_R − 2)/|F|`
-  (paper Lemma 1, rectangular form).
-* Knowledge soundness is argued in the paper in the **standard model** by reduction to
-  the knowledge soundness of the matryoshka bivariate KZG + Lagrange IPA + BDFG20 batch.
-  **This is a paper-level (formal) result; the code does not mechanically verify it.**
+* Statistical soundness of the interactive reduction is `2(M - 1)/|F|` in the
+  even case `M_L = M_R = M`, and `(M_L + M_R - 2)/|F|` in the odd rectangular
+  case. The latter is the formula stated by the paper's odd-variable extension.
+* The paper proves standard-model knowledge soundness for its modified Figure 7
+  batch protocol under its stated assumptions. This repository implements
+  Figure 5 + Figure 6 instead, so it must not claim that Figure-7 theorem for
+  the implemented backend. The implementation also does not mechanically
+  verify any security proof.
 * The implementation provides **no hiding / zero knowledge**; `gen_srs_for_testing`
   samples the trapdoors locally and is TESTING ONLY.
 * All engineering claims (proof size, MSM counts, pairing counts, transcript, profiling,

@@ -476,7 +476,17 @@ mod tests {
                 &srs,
             )?;
             let prep_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            print_csv_row("top_level", "Chopin", nv, n, r, "preprocess", prep_ms, 1, "");
+            print_csv_row(
+                "top_level",
+                "Chopin",
+                nv,
+                n,
+                r,
+                "preprocess",
+                prep_ms,
+                1,
+                "",
+            );
 
             let t0 = Instant::now();
             let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ChopinPCS<E>>>::prove(

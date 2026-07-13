@@ -47,6 +47,7 @@
 
 use crate::pcs::prelude::PCSError;
 use ark_ff::Field;
+#[allow(unused_imports)]
 use ark_std::{string::ToString, vec, vec::Vec, One, Zero};
 
 // ════════════════════════════════════════════════════════════════════
@@ -481,13 +482,29 @@ mod tests {
         let s0 = [alpha, beta, beta_inv];
         let s1 = [beta, beta_inv];
         let s2 = [beta, beta_inv];
-        let v0 = [poly_eval(&p0, alpha), poly_eval(&p0, beta), poly_eval(&p0, beta_inv)];
+        let v0 = [
+            poly_eval(&p0, alpha),
+            poly_eval(&p0, beta),
+            poly_eval(&p0, beta_inv),
+        ];
         let v1 = [poly_eval(&p1, beta), poly_eval(&p1, beta_inv)];
         let v2 = [poly_eval(&p2, beta), poly_eval(&p2, beta_inv)];
         let claims = [
-            BdfgClaim { poly: &p0, points: &s0, values: &v0 },
-            BdfgClaim { poly: &p1, points: &s1, values: &v1 },
-            BdfgClaim { poly: &p2, points: &s2, values: &v2 },
+            BdfgClaim {
+                poly: &p0,
+                points: &s0,
+                values: &v0,
+            },
+            BdfgClaim {
+                poly: &p1,
+                points: &s1,
+                values: &v1,
+            },
+            BdfgClaim {
+                poly: &p2,
+                points: &s2,
+                values: &v2,
+            },
         ];
         let rho = Fr::rand(&mut rng);
         let first = bdfg_first_round(&claims, rho).unwrap();
@@ -520,7 +537,23 @@ mod tests {
         let good = [poly_eval(&p0, a), poly_eval(&p0, b)];
         let bad = [poly_eval(&p0, a) + Fr::one(), poly_eval(&p0, b)];
         let pts = [a, b];
-        assert!(bdfg_first_round(&[BdfgClaim { poly: &p0, points: &pts, values: &good }], Fr::from(7u64)).is_ok());
-        assert!(bdfg_first_round(&[BdfgClaim { poly: &p0, points: &pts, values: &bad }], Fr::from(7u64)).is_err());
+        assert!(bdfg_first_round(
+            &[BdfgClaim {
+                poly: &p0,
+                points: &pts,
+                values: &good
+            }],
+            Fr::from(7u64)
+        )
+        .is_ok());
+        assert!(bdfg_first_round(
+            &[BdfgClaim {
+                poly: &p0,
+                points: &pts,
+                values: &bad
+            }],
+            Fr::from(7u64)
+        )
+        .is_err());
     }
 }

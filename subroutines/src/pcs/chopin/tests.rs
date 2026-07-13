@@ -4,15 +4,16 @@
 //! - even/odd/min `nv` single open/verify (nv=2..8);
 //! - random property tests;
 //! - `open_with_commitment` matches trait `open`;
-//! - paper polynomial identities (restriction, row-fold, coefficient is_f_alpha,
-//!   structured S vs dense, IPA identities, bivariate verifier group equation);
+//! - paper polynomial identities (restriction, row-fold, coefficient
+//!   is_f_alpha, structured S vs dense, IPA identities, bivariate verifier
+//!   group equation);
 //! - BDFG20 coefficient identities (m == Z_T*W, L == (X-z)*W', zero remainders,
 //!   wrapper commitments);
 //! - proof serialization roundtrip and size assertions (560/564 bytes);
 //! - SRS shape (N G1, 3 G2), trim prefix/grid consistency;
-//! - every negative case (wrong value / point / commitment, tampering each
-//!   of the 7 G1 and 7 scalar fields, swapped eval, malformed mu/lengths,
-//!   vk/pk capacity, statement binding, catch_unwind random proofs);
+//! - every negative case (wrong value / point / commitment, tampering each of
+//!   the 7 G1 and 7 scalar fields, swapped eval, malformed mu/lengths, vk/pk
+//!   capacity, statement binding, catch_unwind random proofs);
 //! - sumcheck batch adapter tests (multi_open/batch_verify).
 
 use super::*;
@@ -171,11 +172,7 @@ fn identity_restriction_eta() {
         let psi_l = build_eq_vec::<Fr>(&z_l, big_ml);
         let psi_r = build_eq_vec::<Fr>(&z_r, big_mr);
         let f_zr = compute_restriction(&evals, &psi_r, big_ml, big_mr);
-        let eta: Fr = f_zr
-            .iter()
-            .zip(psi_l.iter())
-            .map(|(a, b)| *a * *b)
-            .sum();
+        let eta: Fr = f_zr.iter().zip(psi_l.iter()).map(|(a, b)| *a * *b).sum();
         // also via direct bilinear eval
         let mut direct = Fr::zero();
         for j in 0..big_mr {
@@ -204,11 +201,7 @@ fn identity_row_fold_a() {
         let alpha = Fr::rand(&mut rng);
         let a = poly_eval(&f_zr, alpha);
         let (_q1, f_alpha) = divide_x_at_alpha(&evals, big_ml, big_mr, alpha);
-        let ip_a: Fr = f_alpha
-            .iter()
-            .zip(psi_r.iter())
-            .map(|(c, p)| *c * *p)
-            .sum();
+        let ip_a: Fr = f_alpha.iter().zip(psi_r.iter()).map(|(c, p)| *c * *p).sum();
         assert_eq!(a, ip_a, "row-fold identity a mismatch at mu={mu}");
     }
 }
@@ -322,15 +315,12 @@ fn identity_ipa_at_beta() {
         let psi_l_bi = eval_tensor(&z_l, beta_inv);
         let psi_r_b = eval_tensor(&z_r, beta);
         let psi_r_bi = eval_tensor(&z_r, beta_inv);
-        let lhs = a1 * psi_l_bi
-            + a2 * psi_l_b
-            + gamma * (b1 * psi_r_bi + b2 * psi_r_b);
+        let lhs = a1 * psi_l_bi + a2 * psi_l_b + gamma * (b1 * psi_r_bi + b2 * psi_r_b);
         let rhs = (eta + gamma * a).double() + beta * s1_val + beta_inv * s2_val;
         assert_eq!(lhs, rhs, "IPA identity failed at mu={mu}");
     }
 }
 
-#[test]
 #[test]
 fn test_bivariate_verifier_via_srs() -> Result<(), PCSError> {
     // Use the real universal params (which has G2) to check the bivariate
@@ -353,10 +343,8 @@ fn test_bivariate_verifier_via_srs() -> Result<(), PCSError> {
     let g2_one = srs.g2_one;
     let g2_tau = srs.g2_tau;
     let g2_sigma = srs.g2_sigma;
-    let tau_minus_alpha =
-        (g2_tau.into_group() - g2_one.into_group() * alpha).into_affine();
-    let sigma_minus_beta =
-        (g2_sigma.into_group() - g2_one.into_group() * beta).into_affine();
+    let tau_minus_alpha = (g2_tau.into_group() - g2_one.into_group() * alpha).into_affine();
+    let sigma_minus_beta = (g2_sigma.into_group() - g2_one.into_group() * beta).into_affine();
     let cf_minus_b1 = (cf.into_group() - pp.g1_powers[0].into_group() * b1).into_affine();
     let neg_pi_x = (-pi_x.into_group()).into_affine();
     let neg_pi_y = (-pi_y.into_group()).into_affine();
@@ -379,6 +367,91 @@ fn poly_trim(v: &[Fr]) -> Vec<Fr> {
         e -= 1;
     }
     v[..e].to_vec()
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Cost-model tests: W/W' exact lengths match bdfg algebra
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn chopin_msm_lengths_match_bdfg_quotients() -> Result<(), PCSError> {
+    // Verify that ChopinMsmLengths::for_num_vars matches the actual
+    // vector lengths returned by bdfg_first_round / bdfg_second_round.
+    let mut rng = test_rng();
+    for nv in 2..=8usize {
+        let (m_left, m_right) = split_exponents(nv);
+        let big_ml = 1usize << m_left;
+        let big_mr = 1usize << m_right;
+        let n = big_ml * big_mr;
+        let evals: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let z_l: Vec<Fr> = (0..m_left).map(|_| Fr::rand(&mut rng)).collect();
+        let z_r: Vec<Fr> = (0..m_right).map(|_| Fr::rand(&mut rng)).collect();
+        let psi_r = super::build_eq_vec::<Fr>(&z_r, big_mr);
+        let f_zr = super::compute_restriction(&evals, &psi_r, big_ml, big_mr);
+        let alpha = Fr::rand(&mut rng);
+        let (_q1, f_alpha) = super::divide_x_at_alpha(&evals, big_ml, big_mr, alpha);
+        let a = poly_eval(&f_zr, alpha);
+
+        let (beta, beta_inv) = loop {
+            let b = Fr::rand(&mut rng);
+            if !b.is_zero() && b.square() != Fr::one() && b != alpha {
+                let bi = b.inverse().unwrap();
+                if bi != alpha {
+                    break (b, bi);
+                }
+            }
+        };
+        let a1 = poly_eval(&f_zr, beta);
+        let a2_ = poly_eval(&f_zr, beta_inv);
+        let b1 = poly_eval(&f_alpha, beta);
+        let b2 = poly_eval(&f_alpha, beta_inv);
+        let s = super::symmetric_lagrange_witness(&f_zr, &z_l, m_left);
+        let s1_val = poly_eval(&s, beta);
+        let s2_val = poly_eval(&s, beta_inv);
+        let rho = Fr::rand(&mut rng);
+
+        let claims = [
+            BdfgClaim {
+                poly: &f_zr,
+                points: &[alpha, beta, beta_inv],
+                values: &[a, a1, a2_],
+            },
+            BdfgClaim {
+                poly: &f_alpha,
+                points: &[beta, beta_inv],
+                values: &[b1, b2],
+            },
+            BdfgClaim {
+                poly: &s,
+                points: &[beta, beta_inv],
+                values: &[s1_val, s2_val],
+            },
+        ];
+        let first = bdfg_first_round(&claims, rho)?;
+        let actual_w_len = first.quot_m.len();
+
+        let z = loop {
+            let z_val = Fr::rand(&mut rng);
+            if !first.union.iter().any(|u| *u == z_val) {
+                break z_val;
+            }
+        };
+        let second = bdfg_second_round(&claims, &first, rho, z)?;
+        let actual_wp_len = second.quot_l.len();
+
+        let model = ChopinMsmLengths::for_num_vars(nv);
+        assert_eq!(
+            actual_w_len, model.w_len,
+            "W length mismatch at nv={nv}: actual={actual_w_len} model={}",
+            model.w_len
+        );
+        assert_eq!(
+            actual_wp_len, model.wp_len,
+            "W' length mismatch at nv={nv}: actual={actual_wp_len} model={}",
+            model.wp_len
+        );
+    }
+    Ok(())
 }
 
 #[test]
@@ -420,9 +493,21 @@ fn bdfg_coefficient_identities() -> Result<(), PCSError> {
         let rho = Fr::rand(&mut rng);
 
         let claims = [
-            BdfgClaim { poly: &f_zr, points: &[alpha, beta, beta_inv], values: &[a, a1, a2] },
-            BdfgClaim { poly: &f_alpha, points: &[beta, beta_inv], values: &[b1, b2] },
-            BdfgClaim { poly: &s, points: &[beta, beta_inv], values: &[s1_val, s2_val] },
+            BdfgClaim {
+                poly: &f_zr,
+                points: &[alpha, beta, beta_inv],
+                values: &[a, a1, a2],
+            },
+            BdfgClaim {
+                poly: &f_alpha,
+                points: &[beta, beta_inv],
+                values: &[b1, b2],
+            },
+            BdfgClaim {
+                poly: &s,
+                points: &[beta, beta_inv],
+                values: &[s1_val, s2_val],
+            },
         ];
 
         let first = bdfg_first_round(&claims, rho)?;
@@ -450,7 +535,11 @@ fn bdfg_coefficient_identities() -> Result<(), PCSError> {
 
         // Verifier homomorphic reconstruction.
         let comb = bdfg_verifier_combination(
-            &[&[alpha, beta, beta_inv], &[beta, beta_inv], &[beta, beta_inv]],
+            &[
+                &[alpha, beta, beta_inv],
+                &[beta, beta_inv],
+                &[beta, beta_inv],
+            ],
             &[&[a, a1, a2], &[b1, b2], &[s1_val, s2_val]],
             rho,
             z,
@@ -515,14 +604,20 @@ fn proof_size_cryptographic_payload() -> Result<(), PCSError> {
 #[test]
 fn proof_size_constant_across_nv() -> Result<(), PCSError> {
     let mut rng = test_rng();
-    for nv in [8usize, 10, 12, 14, 16, 20] {
+    // Check one even and one odd nv. Full range (8..20) is in the ignored
+    // benchmark.
+    for nv in [6usize, 7] {
         let (ck, _vk) = setup(nv);
         let p = rand_poly(nv, &mut rng);
         let pt = rand_point(nv, &mut rng);
         let (proof, _val) = ChopinPCS::<E>::open(&ck, &p, &pt)?;
         let mut bytes = Vec::new();
         proof.serialize_compressed(&mut bytes).unwrap();
-        assert_eq!(bytes.len(), 564, "proof size must be constant 564 at nv={nv}");
+        assert_eq!(
+            bytes.len(),
+            564,
+            "proof size must be constant 564 at nv={nv}"
+        );
     }
     Ok(())
 }
@@ -614,7 +709,9 @@ fn reject_tampered_g1_fields() -> Result<(), PCSError> {
     let (proof, val) = ChopinPCS::<E>::open(&ck, &p, &pt)?;
     let mutators: Vec<(&str, fn(&mut ChopinProof<E>))> = vec![
         ("comm_f_zr", |pr| pr.comm_f_zr = tamper_g1(&pr.comm_f_zr)),
-        ("comm_f_alpha", |pr| pr.comm_f_alpha = tamper_g1(&pr.comm_f_alpha)),
+        ("comm_f_alpha", |pr| {
+            pr.comm_f_alpha = tamper_g1(&pr.comm_f_alpha)
+        }),
         ("comm_s", |pr| pr.comm_s = tamper_g1(&pr.comm_s)),
         ("pi_biv_x", |pr| pr.pi_biv_x = tamper_g1(&pr.pi_biv_x)),
         ("pi_biv_y", |pr| pr.pi_biv_y = tamper_g1(&pr.pi_biv_y)),
@@ -804,10 +901,10 @@ fn challenge_drawing_nonzero() -> Result<(), PCSError> {
 }
 
 #[test]
-fn challenge_drawing_reciprocal() -> Result<(), PCSError> {
+fn challenge_drawing_beta() -> Result<(), PCSError> {
     let mut t = IOPTranscript::<Fr>::new(b"test");
     t.append_field_element(b"init", &Fr::zero())?;
-    let (c, cinv) = draw_reciprocal(&mut t, b"c")?;
+    let (c, cinv) = draw_beta(&mut t, b"c", Fr::zero())?;
     assert!(!c.is_zero());
     assert_ne!(c, cinv);
     assert_eq!(c * cinv, Fr::one());

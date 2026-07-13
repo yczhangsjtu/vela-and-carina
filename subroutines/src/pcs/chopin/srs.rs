@@ -20,11 +20,12 @@
 //! coefficients `q1_j[i]` have `0 <= i < M_L-1`, `0 <= j < M_R` (length
 //! `(M_L-1)*M_R = N-M_R`). To make that a single contiguous prefix MSM, the
 //! grid is stored dominant-q1-first (j-major prefix):
-//!   base_index(i,j) = j*(M_L-1)+i           for i < M_L-1  (prefix, size N-M_R)
-//!                   = (M_L-1)*M_R + j        for i == M_L-1 (tail, the top X power)
-//! This is a bijection of the full M_L x M_R grid onto [0, N). The same Vec
-//! serves the full commitment (an N-MSM), the q1 prefix MSM, the tau-slice
-//! MSMs (`f_zR`, `f_alpha`, `S`, `W`, `W'`) and the sigma-slice MSM (`q2`).
+//!   base_index(i,j) = j*(M_L-1)+i           for i < M_L-1  (prefix, size
+//! N-M_R)                   = (M_L-1)*M_R + j        for i == M_L-1 (tail, the
+//! top X power) This is a bijection of the full M_L x M_R grid onto [0, N). The
+//! same Vec serves the full commitment (an N-MSM), the q1 prefix MSM, the
+//! tau-slice MSMs (`f_zR`, `f_alpha`, `S`, `W`, `W'`) and the sigma-slice MSM
+//! (`q2`).
 //!
 //! WARNING: `gen_srs_for_testing` samples the trapdoors `tau, sigma` locally.
 //! It is FOR TESTING ONLY and MUST NOT be used as a production trusted setup.
@@ -135,6 +136,7 @@ impl<E: Pairing> ChopinProverParam<E> {
         (self.big_ml() - 1) * self.big_mr()
     }
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn base_index(&self, i: usize, j: usize) -> usize {
         grid_base_index(self.big_ml(), self.big_mr(), i, j)
     }
@@ -142,6 +144,7 @@ impl<E: Pairing> ChopinProverParam<E> {
     /// Full commitment `C_F = [f(τ,σ)]_1`. Reorders the canonical evaluation
     /// vector `evals[i + M_L*j]` into the dominant-q1-first layout and performs
     /// a single N-MSM over the whole grid.
+    #[allow(dead_code)]
     pub(crate) fn msm_full_reordered(
         &self,
         evals: &[E::ScalarField],
@@ -194,12 +197,10 @@ impl<E: Pairing> ChopinProverParam<E> {
     /// Commit a univariate polynomial (degree `< M_L`) on the `sigma^0` slice
     /// `[tau^i]_1`. Positions `0..M_L-1` are the contiguous prefix; the single
     /// top coefficient (index `M_L-1`, if present) sits at position
-    /// `(M_L-1)*M_R`. So this is a contiguous prefix MSM plus at most one scalar
-    /// multiplication — it never allocates a fresh `M_L`-length base vector.
-    pub(crate) fn msm_tau_slice(
-        &self,
-        coeffs: &[E::ScalarField],
-    ) -> Result<E::G1Affine, PCSError> {
+    /// `(M_L-1)*M_R`. So this is a contiguous prefix MSM plus at most one
+    /// scalar multiplication — it never allocates a fresh `M_L`-length base
+    /// vector.
+    pub(crate) fn msm_tau_slice(&self, coeffs: &[E::ScalarField]) -> Result<E::G1Affine, PCSError> {
         let big_ml = self.big_ml();
         if coeffs.len() > big_ml {
             return Err(PCSError::InvalidParameters(format!(

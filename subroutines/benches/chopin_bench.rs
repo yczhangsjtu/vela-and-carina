@@ -17,9 +17,9 @@
 // Env vars:
 //   CHOPIN_BENCH_NV_RANGE        default 8,10,12,14,16,18,20
 //   CHOPIN_BENCH_BACKEND         mkzg|gemini|recipcs|samaritan|zeromorph|nrg|
-//                                mercury|chopin|all (+ mulcs legacy, nrg aliases)
-//   CHOPIN_BENCH_MODE            comparison|detail (default comparison)
-//   CHOPIN_VERIFY_REPETITIONS    default 100.
+//                                mercury|chopin|all (+ mulcs legacy, nrg
+// aliases)   CHOPIN_BENCH_MODE            comparison|detail (default
+// comparison)   CHOPIN_VERIFY_REPETITIONS    default 100.
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::UniformRand;
@@ -29,8 +29,8 @@ use ark_std::{sync::Arc, test_rng};
 use std::{collections::BTreeSet, env, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
-        ReciPCS, SamaritanPCS, ZeromorphPCS,
+        ChopinMsmLengths, ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS,
+        NestedGridKzgPCS, PCSError, ReciPCS, SamaritanPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -176,7 +176,9 @@ fn main() -> Result<(), PCSError> {
     let backends = parse_backends()?;
 
     if nv_list.iter().any(|&nv| nv >= 18) {
-        eprintln!("# NOTE: large nv requested; run each nv/backend in its OWN process to bound peak RSS:");
+        eprintln!(
+            "# NOTE: large nv requested; run each nv/backend in its OWN process to bound peak RSS:"
+        );
         eprintln!("#   CHOPIN_BENCH_NV_RANGE=20 CHOPIN_BENCH_BACKEND=chopin cargo bench -p subroutines --bench chopin-benches");
     }
 
@@ -214,7 +216,11 @@ fn run_comparison(nv_list: &[usize], backends: &[String], reps: usize) -> Result
                 "mercury" => compare_row::<MercuryPCS<E>>("Mercury", false, nv, reps)?,
                 "chopin" => compare_row::<ChopinPCS<E>>("Chopin", false, nv, reps)?,
                 "mulcs" => compare_row::<MulcsPCS<E>>("MulcsClaymore", true, nv, reps)?,
-                other => return Err(PCSError::InvalidParameters(format!("unreachable backend {other}"))),
+                other => {
+                    return Err(PCSError::InvalidParameters(format!(
+                        "unreachable backend {other}"
+                    )))
+                },
             }
         }
     }
@@ -314,7 +320,7 @@ fn detail_row(nv: usize, reps: usize) -> Result<(), PCSError> {
     let (ck, vk) = ChopinPCS::<E>::trim(&srs, None, Some(nv))?;
     let srs_g1 = ml * mr;
     let srs_g2 = 3usize;
-    let pk_bytes = compressed_len(&ck);
+    let pk_bytes = ck.g1_powers.len() * 48; // G1 compressed bytes
     let vk_bytes = compressed_len(&vk);
 
     let poly = Arc::new(DenseMultilinearExtension::rand(nv, &mut rng));
@@ -341,13 +347,18 @@ fn detail_row(nv: usize, reps: usize) -> Result<(), PCSError> {
     }
     let (mean, median) = mean_median(samples);
 
-    let q1_len = (ml - 1) * mr;
-    let q2_len = mr.saturating_sub(1);
-    let c0_len = ml;
-    let c1_len = mr;
-    let cs_len = ml.saturating_sub(1);
-    let w_len = ml.saturating_sub(8).max(1); // W degree bound rough approx
-    let wp_len = ml.saturating_sub(2).max(1);
+    let msm = ChopinMsmLengths::for_num_vars(nv);
+    let q1_len = msm.q1_len;
+    let q2_len = msm.q2_len;
+    let c0_len = msm.c0_len;
+    let c1_len = msm.c1_len;
+    let cs_len = msm.cs_len;
+
+    // Exact W/W' coefficient-vector lengths (MSM input lengths) from the
+    // cost model, verified against bdfg_first_round().quot_m.len() and
+    // bdfg_second_round().quot_l.len() in the cost-model tests.
+    let w_len = msm.w_len;
+    let wp_len = msm.wp_len;
 
     println!(
         "{nv},{n},{m_left},{m_right},{ml},{mr},{srs_g1},{srs_g2},{pk_bytes},{vk_bytes},\

@@ -74,15 +74,17 @@ where
     }
 
     /// Batch open all the points over a merged polynomial.
-    /// A simple wrapper of PCS::multi_open
+    /// Uses the commitment-aware API when the PCS supports it, so that
+    /// the prover does not re-compute commitments for g'.
     pub(super) fn multi_open(
         &self,
         prover_param: impl Borrow<PCS::ProverParam>,
         transcript: &mut IOPTranscript<E::ScalarField>,
     ) -> Result<PCS::BatchProof, HyperPlonkErrors> {
-        Ok(PCS::multi_open(
+        Ok(PCS::multi_open_with_commitments(
             prover_param.borrow(),
             self.polynomials.as_ref(),
+            self.commitments.as_ref(),
             self.points.as_ref(),
             self.evals.as_ref(),
             transcript,
