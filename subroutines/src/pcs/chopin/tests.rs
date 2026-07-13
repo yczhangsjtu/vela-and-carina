@@ -477,7 +477,7 @@ fn bdfg_coefficient_identities() -> Result<(), PCSError> {
         let (m_left, m_right) = split_exponents(mu);
         let big_ml = 1usize << m_left;
         let big_mr = 1usize << m_right;
-        let n = big_ml * big_mr;
+        let _n = big_ml * big_mr;
         let (ck, _vk) = setup(mu);
         // Random committed polynomials with real CHOPIN degree bounds.
         let f_zr: Vec<Fr> = (0..big_ml).map(|_| Fr::rand(&mut rng)).collect();

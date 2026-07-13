@@ -155,6 +155,42 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for GeminiPCS<E> {
     }
 }
 
+impl<E: Pairing> GeminiPCS<E> {
+    /// Open a polynomial at a point given a pre-computed commitment `cm_f`.
+    ///
+    /// This avoids the N-size MSM recommit that the trait `open` performs
+    /// (via `gemini_open_with_transcript`).  `commitment` MUST equal
+    /// `commit(pp, poly)`.
+    pub fn open_with_commitment(
+        pp: &GeminiProverParam<E>,
+        poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+        point: &[E::ScalarField],
+        commitment: &Commitment<E>,
+    ) -> Result<(GeminiProof<E>, E::ScalarField), PCSError> {
+        let mu = poly.num_vars();
+        let _n = checked_domain_size_from_mu(mu, "open_with_commitment")
+            .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
+        if point.len() != mu {
+            return Err(PCSError::InvalidParameters(
+                "point length mismatch".to_string(),
+            ));
+        }
+        let mut transcript = IOPTranscript::new(b"gemini-open");
+        transcript.append_field_element(b"mu", &E::ScalarField::from(mu as u64))?;
+
+        let f_hat = poly.to_evaluations();
+        let eval = poly
+            .evaluate(point)
+            .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
+
+        transcript.append_serializable_element(b"commitment", &commitment.0)?;
+        transcript.append_serializable_element(b"point", &point.to_vec())?;
+        transcript.append_field_element(b"eval", &eval)?;
+
+        gemini_core_open_prebound(pp, poly, point, f_hat, eval, &mut transcript, commitment.0)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Verifier safety helpers
 // ═══════════════════════════════════════════════════════════════════
@@ -455,7 +491,7 @@ fn gemini_open_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<(GeminiProof<E>, E::ScalarField), PCSError> {
     let mu = poly.num_vars();
-    let n = checked_domain_size_from_mu(mu, "open")
+    let _n = checked_domain_size_from_mu(mu, "open")
         .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
 
     if point.len() != mu {
@@ -463,8 +499,6 @@ fn gemini_open_with_transcript<E: Pairing>(
             "point length mismatch".to_string(),
         ));
     }
-
-    let _t_total = ScopedTimer::new(BACKEND, mu, n, "gemini_open_total", 1, "total");
 
     let f_hat = poly.to_evaluations();
     let eval = poly
@@ -475,6 +509,25 @@ fn gemini_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"commitment", &a0_commit)?;
     transcript.append_serializable_element(b"point", &point.to_vec())?;
     transcript.append_field_element(b"eval", &eval)?;
+
+    gemini_core_open_prebound(pp, poly, point, f_hat, eval, transcript, a0_commit)
+}
+
+/// Core Gemini opening: the transcript already has commitment, point, and
+/// evaluation bound.  `a0_commit` is the G1Affine of C_f (already computed).
+fn gemini_core_open_prebound<E: Pairing>(
+    pp: &GeminiProverParam<E>,
+    poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+    point: &[E::ScalarField],
+    f_hat: Vec<E::ScalarField>,
+    eval: E::ScalarField,
+    transcript: &mut IOPTranscript<E::ScalarField>,
+    a0_commit: E::G1Affine,
+) -> Result<(GeminiProof<E>, E::ScalarField), PCSError> {
+    let mu = poly.num_vars();
+    let n = 1usize << mu;
+
+    let _t_total = ScopedTimer::new(BACKEND, mu, n, "gemini_open_total", 1, "total");
 
     let _t_fold = ScopedTimer::new(
         BACKEND,
@@ -2163,6 +2216,75 @@ mod tests {
         proof.shplonk_q_commit =
             (proof.shplonk_q_commit.into_group() * Fr::from(2u64)).into_affine();
         assert!(!GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        Ok(())
+    }
+
+    // ── open_with_commitment ──
+
+    #[test]
+    fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = GeminiPCS::<E>::commit(&ck, &p)?;
+            let (proof_a, val_a) = GeminiPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            let (proof_b, val_b) = GeminiPCS::<E>::open(&ck, &p, &pt)?;
+            assert_eq!(val_a, val_b);
+            assert!(GeminiPCS::<E>::verify(&vk, &com, &pt, &val_a, &proof_a)?);
+            assert!(GeminiPCS::<E>::verify(&vk, &com, &pt, &val_b, &proof_b)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_valid_proof_accepted() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8, 10] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = GeminiPCS::<E>::commit(&ck, &p)?;
+            let (proof, val) = GeminiPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            assert!(GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let p2 = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let wrong_com = GeminiPCS::<E>::commit(&ck, &p2)?;
+            let r = GeminiPCS::<E>::open_with_commitment(&ck, &p, &pt, &wrong_com);
+            if let Ok((proof, val)) = r {
+                let com = GeminiPCS::<E>::commit(&ck, &p)?;
+                assert!(
+                    !GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?,
+                    "wrong commitment should not produce verifiable proof"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_wrong_point_len_no_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, _) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let _pt = rpt(nv, &mut rng);
+        let com = GeminiPCS::<E>::commit(&ck, &p)?;
+        let short = rpt(2, &mut rng);
+        assert!(GeminiPCS::<E>::open_with_commitment(&ck, &p, &short, &com).is_err());
+        let long = rpt(8, &mut rng);
+        assert!(GeminiPCS::<E>::open_with_commitment(&ck, &p, &long, &com).is_err());
         Ok(())
     }
 

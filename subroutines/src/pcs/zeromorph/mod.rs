@@ -115,6 +115,39 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ZeromorphPCS<E> {
     }
 }
 
+impl<E: Pairing> ZeromorphPCS<E> {
+    /// Open a polynomial at a point given a pre-computed commitment `cm_f`.
+    ///
+    /// This avoids the N-size MSM recommit that the trait `open` performs
+    /// (via `open_with_transcript`).  `commitment` MUST equal
+    /// `commit(pp, poly)`.
+    pub fn open_with_commitment(
+        pp: &ZeromorphProverParam<E>,
+        poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+        point: &[E::ScalarField],
+        commitment: &Commitment<E>,
+    ) -> Result<(ZeromorphProof<E>, E::ScalarField), PCSError> {
+        let num_vars = poly.num_vars();
+        if point.len() != num_vars {
+            return Err(PCSError::InvalidParameters(
+                "point length mismatch".to_string(),
+            ));
+        }
+        let mut transcript = IOPTranscript::new(b"zm-open");
+
+        let coeffs = poly.to_evaluations();
+        let eval = poly
+            .evaluate(point)
+            .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
+
+        transcript.append_serializable_element(b"commitment", &commitment.0)?;
+        transcript.append_serializable_element(b"point", &point.to_vec())?;
+        transcript.append_field_element(b"eval", &eval)?;
+
+        zeromorph_core_open_prebound(pp, poly, point, &mut transcript, coeffs, eval)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Quotients — exactly matching plonkish quotients()
 // ═══════════════════════════════════════════════════════════════════
@@ -232,7 +265,7 @@ fn open_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<(ZeromorphProof<E>, E::ScalarField), PCSError> {
     let num_vars = poly.num_vars();
-    let n = 1 << num_vars;
+    let _n = 1 << num_vars;
 
     if point.len() != num_vars {
         return Err(PCSError::InvalidParameters(
@@ -240,7 +273,6 @@ fn open_with_transcript<E: Pairing>(
         ));
     }
 
-    // Absorb commitment, point, eval (bind proof to these)
     let coeffs = poly.to_evaluations();
     let commit_cm = pp.commit_commit(&coeffs);
     transcript.append_serializable_element(b"commitment", &commit_cm)?;
@@ -250,6 +282,22 @@ fn open_with_transcript<E: Pairing>(
         .evaluate(point)
         .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
     transcript.append_field_element(b"eval", &eval)?;
+
+    zeromorph_core_open_prebound(pp, poly, point, transcript, coeffs, eval)
+}
+
+/// Core Zeromorph opening: the transcript already has commitment, point, and
+/// evaluation bound.
+fn zeromorph_core_open_prebound<E: Pairing>(
+    pp: &ZeromorphProverParam<E>,
+    poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+    point: &[E::ScalarField],
+    transcript: &mut IOPTranscript<E::ScalarField>,
+    coeffs: Vec<E::ScalarField>,
+    eval: E::ScalarField,
+) -> Result<(ZeromorphProof<E>, E::ScalarField), PCSError> {
+    let num_vars = poly.num_vars();
+    let n = 1 << num_vars;
 
     // 1. Compute quotients
     let _t_quotients = profile::ScopedTimer::new(
@@ -908,6 +956,74 @@ mod tests {
         let (mut proof, val) = ZeromorphPCS::<E>::open(&ck, &p, &pt)?;
         proof.kzg_proof = (proof.kzg_proof.into_group() * Fr::from(3u64)).into_affine();
         assert!(!ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        Ok(())
+    }
+
+    // ── open_with_commitment ──
+
+    #[test]
+    fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+            let (proof_a, val_a) = ZeromorphPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            let (proof_b, val_b) = ZeromorphPCS::<E>::open(&ck, &p, &pt)?;
+            assert_eq!(val_a, val_b);
+            assert!(ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val_a, &proof_a)?);
+            assert!(ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val_b, &proof_b)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_valid_proof_accepted() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8, 10] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+            let (proof, val) = ZeromorphPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            assert!(ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let p2 = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let wrong_com = ZeromorphPCS::<E>::commit(&ck, &p2)?;
+            let r = ZeromorphPCS::<E>::open_with_commitment(&ck, &p, &pt, &wrong_com);
+            if let Ok((proof, val)) = r {
+                let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+                assert!(
+                    !ZeromorphPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?,
+                    "wrong commitment should not produce verifiable proof"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_wrong_point_len_no_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, _) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let com = ZeromorphPCS::<E>::commit(&ck, &p)?;
+        let short = rpt(2, &mut rng);
+        assert!(ZeromorphPCS::<E>::open_with_commitment(&ck, &p, &short, &com).is_err());
+        let long = rpt(8, &mut rng);
+        assert!(ZeromorphPCS::<E>::open_with_commitment(&ck, &p, &long, &com).is_err());
         Ok(())
     }
 }

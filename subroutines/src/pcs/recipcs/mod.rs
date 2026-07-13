@@ -160,8 +160,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
             .evaluate(point)
             .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
         let cm_f = ReciPCS::<E>::commit(pp, poly)?;
-        let mut t = new_transcript::<E>(poly.num_vars(), &cm_f, point, &value)?;
-        recipcs_open(pp, poly, point, &value, &mut t)
+        Self::open_with_commitment(pp, poly, point, value, &cm_f)
     }
 
     fn verify(
@@ -205,6 +204,31 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
             batch_proof,
             transcript,
         )
+    }
+}
+
+impl<E: Pairing> ReciPCS<E> {
+    /// Open a polynomial at a point given a pre-computed commitment `cm_f`.
+    ///
+    /// This avoids the N-size MSM recommit that the trait `open` performs.
+    /// The `commitment` MUST equal `commit(pp, poly)`.
+    pub fn open_with_commitment(
+        pp: &ReciProverParam<E>,
+        poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+        point: &[E::ScalarField],
+        value: E::ScalarField,
+        commitment: &Commitment<E>,
+    ) -> Result<(ReciProof<E>, E::ScalarField), PCSError> {
+        let mu = poly.num_vars();
+        if point.len() != mu {
+            return Err(PCSError::InvalidParameters(format!(
+                "point length {} != mu {}",
+                point.len(),
+                mu
+            )));
+        }
+        let mut t = new_transcript::<E>(mu, commitment, point, &value)?;
+        recipcs_open(pp, poly, point, &value, &mut t)
     }
 }
 

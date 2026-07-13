@@ -64,6 +64,10 @@ name = "chopin-benches"
 path = "benches/chopin_bench.rs"
 harness = false
 
+[[bin]]
+name = "pcs_single_open_bench"
+path = "src/bin/pcs_single_open_bench.rs"
+
 [features]
 # default = [ "parallel", "print-trace" ]
 default = ["parallel"]

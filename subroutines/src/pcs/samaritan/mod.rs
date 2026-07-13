@@ -154,6 +154,42 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for SamaritanPCS<E> {
     }
 }
 
+impl<E: Pairing> SamaritanPCS<E> {
+    /// Open a polynomial at a point given a pre-computed commitment `cm_f`.
+    ///
+    /// This avoids the N-size MSM recommit that the trait `open` performs
+    /// (via `samaritan_open_with_transcript`).  `commitment` MUST equal
+    /// `commit(pp, poly)`.
+    pub fn open_with_commitment(
+        pp: &SamaritanProverParam<E>,
+        poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+        point: &[E::ScalarField],
+        commitment: &Commitment<E>,
+    ) -> Result<(SamaritanProof<E>, E::ScalarField), PCSError> {
+        let mu = poly.num_vars();
+        let (_n, _kappa, _nu, _m, _l) = checked_split_params(mu, "open_with_commitment")
+            .map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
+        if point.len() != mu {
+            return Err(PCSError::InvalidParameters(
+                "point length mismatch".to_string(),
+            ));
+        }
+        let mut transcript = IOPTranscript::new(b"samaritan-open");
+        transcript.append_field_element(b"mu", &E::ScalarField::from(mu as u64))?;
+
+        let coeffs = poly.to_evaluations();
+        let eval = poly
+            .evaluate(point)
+            .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
+
+        transcript.append_serializable_element(b"commitment", &commitment.0)?;
+        transcript.append_serializable_element(b"point", &point.to_vec())?;
+        transcript.append_field_element(b"eval", &eval)?;
+
+        samaritan_core_open_prebound(pp, poly, point, &mut transcript, coeffs, eval)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Verifier safety helpers
 // ═══════════════════════════════════════════════════════════════════
@@ -779,7 +815,7 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<(SamaritanProof<E>, E::ScalarField), PCSError> {
     let mu = poly.num_vars();
-    let (n, kappa, nu, m, l) =
+    let (_n, _kappa, _nu, _m, _l) =
         checked_split_params(mu, "open").map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
 
     if point.len() != mu {
@@ -787,8 +823,6 @@ fn samaritan_open_with_transcript<E: Pairing>(
             "point length mismatch".to_string(),
         ));
     }
-
-    let _t_total = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_total", 1, "total");
 
     let coeffs = poly.to_evaluations();
     let eval = poly
@@ -800,7 +834,24 @@ fn samaritan_open_with_transcript<E: Pairing>(
     transcript.append_serializable_element(b"point", &point.to_vec())?;
     transcript.append_field_element(b"eval", &eval)?;
 
-    let f_hat = coeffs;
+    samaritan_core_open_prebound(pp, poly, point, transcript, coeffs, eval)
+}
+
+/// Core Samaritan opening: the transcript already has commitment, point, and
+/// evaluation bound.  `f_hat` is the evaluation-form of the polynomial (owned).
+fn samaritan_core_open_prebound<E: Pairing>(
+    pp: &SamaritanProverParam<E>,
+    poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
+    point: &[E::ScalarField],
+    transcript: &mut IOPTranscript<E::ScalarField>,
+    f_hat: Vec<E::ScalarField>,
+    eval: E::ScalarField,
+) -> Result<(SamaritanProof<E>, E::ScalarField), PCSError> {
+    let mu = poly.num_vars();
+    let (n, kappa, nu, m, l) =
+        checked_split_params(mu, "open").map_err(|e| PCSError::InvalidParameters(e.to_string()))?;
+
+    let _t_total = ScopedTimer::new(BACKEND, mu, n, "samaritan_open_total", 1, "total");
 
     let _t_get_eval =
         ScopedTimer::new(BACKEND, mu, n, "samaritan_open_get_eval_set", l, "eval-set");
@@ -2379,6 +2430,75 @@ mod tests {
                 assert_eq!(o, n, "(l,m)=({l},{m}) idx={i}: old={o:?} new={n:?}");
             }
         }
+    }
+
+    // ── open_with_commitment ──
+
+    #[test]
+    fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = SamaritanPCS::<E>::commit(&ck, &p)?;
+            let (proof_a, val_a) = SamaritanPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            let (proof_b, val_b) = SamaritanPCS::<E>::open(&ck, &p, &pt)?;
+            assert_eq!(val_a, val_b);
+            assert!(SamaritanPCS::<E>::verify(&vk, &com, &pt, &val_a, &proof_a)?);
+            assert!(SamaritanPCS::<E>::verify(&vk, &com, &pt, &val_b, &proof_b)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_valid_proof_accepted() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 6, 8, 10] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let com = SamaritanPCS::<E>::commit(&ck, &p)?;
+            let (proof, val) = SamaritanPCS::<E>::open_with_commitment(&ck, &p, &pt, &com)?;
+            assert!(SamaritanPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        for nv in [4usize, 8] {
+            let (ck, vk) = setup(nv);
+            let p = rpoly(nv, &mut rng);
+            let p2 = rpoly(nv, &mut rng);
+            let pt = rpt(nv, &mut rng);
+            let wrong_com = SamaritanPCS::<E>::commit(&ck, &p2)?;
+            let r = SamaritanPCS::<E>::open_with_commitment(&ck, &p, &pt, &wrong_com);
+            if let Ok((proof, val)) = r {
+                let com = SamaritanPCS::<E>::commit(&ck, &p)?;
+                assert!(
+                    !SamaritanPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?,
+                    "wrong commitment should not produce verifiable proof"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_with_commitment_wrong_point_len_no_panic() -> Result<(), PCSError> {
+        let mut rng = test_rng();
+        let nv = 4;
+        let (ck, _) = setup(nv);
+        let p = rpoly(nv, &mut rng);
+        let _pt = rpt(nv, &mut rng);
+        let com = SamaritanPCS::<E>::commit(&ck, &p)?;
+        let short = rpt(2, &mut rng);
+        assert!(SamaritanPCS::<E>::open_with_commitment(&ck, &p, &short, &com).is_err());
+        let long = rpt(8, &mut rng);
+        assert!(SamaritanPCS::<E>::open_with_commitment(&ck, &p, &long, &com).is_err());
+        Ok(())
     }
 
     fn assert_rejects(r: Result<bool, PCSError>) {

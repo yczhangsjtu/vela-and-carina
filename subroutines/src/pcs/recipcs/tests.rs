@@ -457,3 +457,88 @@ fn test_batch_rejects_wrong_eval() -> Result<(), PCSError> {
     assert!(r.is_err() || !r.unwrap());
     Ok(())
 }
+
+// ── open_with_commitment: matches trait open ──
+#[test]
+fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    for nv in [2usize, 4, 6, 8] {
+        let (ck, vk) = setup(nv);
+        let poly = rand_poly(nv, &mut rng);
+        let point = rand_point(nv, &mut rng);
+        let value = poly.evaluate(&point).unwrap();
+        let com = ReciPCS::<E>::commit(&ck, &poly)?;
+        let (proof_a, val_a) = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
+        let (proof_b, val_b) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+        assert_eq!(val_a, val_b);
+        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val_a, &proof_a)?);
+        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val_b, &proof_b)?);
+    }
+    Ok(())
+}
+
+// ── open_with_commitment: wrong commitment is rejected ──
+#[test]
+fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    for nv in [2usize, 4, 8] {
+        let (ck, _vk) = setup(nv);
+        let poly = rand_poly(nv, &mut rng);
+        let poly2 = rand_poly(nv, &mut rng);
+        let point = rand_point(nv, &mut rng);
+        let value = poly.evaluate(&point).unwrap();
+        let wrong_com = ReciPCS::<E>::commit(&ck, &poly2)?;
+        let r = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &wrong_com);
+        // The value inconsistency is detected inside recipcs_open; may error or
+        // produce a proof that fails verification.
+        if let Ok((proof, val)) = r {
+            let (_, vk) = setup(nv);
+            let com = ReciPCS::<E>::commit(&ck, &poly)?;
+            assert!(
+                !ReciPCS::<E>::verify(&vk, &com, &point, &val, &proof)?,
+                "wrong commitment should not produce verifiable proof"
+            );
+        }
+    }
+    Ok(())
+}
+
+// ── open_with_commitment: generated proof is accepted by normal verifier ──
+#[test]
+fn test_open_with_commitment_valid_proof_accepted() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    for nv in [2usize, 4, 6, 8, 10] {
+        let (ck, vk) = setup(nv);
+        let poly = rand_poly(nv, &mut rng);
+        let point = rand_point(nv, &mut rng);
+        let value = poly.evaluate(&point).unwrap();
+        let com = ReciPCS::<E>::commit(&ck, &poly)?;
+        let (proof, val) = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
+        assert_eq!(val, value);
+        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val, &proof)?);
+        // Wrong value must be rejected.
+        assert!(!ReciPCS::<E>::verify(
+            &vk,
+            &com,
+            &point,
+            &(val + Fr::one()),
+            &proof
+        )?);
+    }
+    Ok(())
+}
+
+// ── open_with_commitment: wrong point length does not panic ──
+#[test]
+fn test_open_with_commitment_wrong_point_len_no_panic() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let (ck, _vk) = setup(4);
+    let poly = rand_poly(4, &mut rng);
+    let com = ReciPCS::<E>::commit(&ck, &poly)?;
+    let value = poly.evaluate(&[Fr::zero(); 4]).unwrap();
+    let short = vec![Fr::zero(); 2];
+    assert!(ReciPCS::<E>::open_with_commitment(&ck, &poly, &short, value, &com).is_err());
+    let long = vec![Fr::zero(); 8];
+    assert!(ReciPCS::<E>::open_with_commitment(&ck, &poly, &long, value, &com).is_err());
+    Ok(())
+}
