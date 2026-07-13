@@ -105,7 +105,8 @@ the degree-check identity. `alpha,gamma,zeta,beta,z_bdfg,d_pair` are Fiat–Sham
 challenges, never sent. Every field/G1 in the struct is used by the verifier.
 
 Cryptographic payload = `8*|G1| + 6*|F|`. On BLS12-381 compressed: `8*48 + 6*32
-= 576` bytes (plus the tiny `mu` and serialization framing).
+= 576` bytes of group/field material; the full serialized proof (including the
+small `mu` header) measures **584 bytes** (asserted in `proof_size_matches_field_count`).
 
 **SRS** (tight Mercury SRS, *not* the Claymore 2N SRS):
 - G1: `[tau^0..tau^{N-1}]_1`, exactly `N = 2^mu` powers (max committed degree is
@@ -114,15 +115,26 @@ Cryptographic payload = `8*|G1| + 6*|F|`. On BLS12-381 compressed: `8*48 + 6*32
 - G2: exactly `[1]_2` and `[tau]_2`. Every pairing check has the form
   `e(L,[1]_2)=e(R,[tau]_2)`; no `[tau^2]_2` or higher is needed.
 
-**Prover** (core, excludes trait-API recommit of `C_f`): two `N`-scalar MSMs
-(`comm_q`, `comm_quot_f`) + six `O(b)=O(sqrt N)` MSMs (`comm_h,comm_g,comm_s,
-comm_d,comm_w,comm_w_prime`) => `2N + O(sqrt N)` scalar multiplications. Field
-work: `divide_by_binomial` `O(N)`, structured `S` `O(sqrt N * log N)`, all other
-`O(sqrt N)` => `O(N)` field ops, no FFT.
+**Prover** (core opening, i.e. `open_with_commitment`, excludes the trait-API
+`C_f` recommit): the two dominant MSMs are `comm_q` (`q` has degree `N-b-1`, so
+`N-b` scalars) and `comm_quot_f` (degree `N-2`, so `N-1` scalars); the six
+sqrt-scale MSMs are `comm_h`, `comm_g`, `comm_d` (each `b` scalars), `comm_s`
+(`b-1`), `comm_w`, `comm_w_prime` (`~b-2` each). This is `2N + O(sqrt N)` scalar
+multiplications; the benchmark's `detail` mode and the `PCS_PROFILE=1` counts
+report the exact per-MSM sizes. Under the `parallel` feature `(comm_q, comm_g)`
+and `(comm_s, comm_d)` are committed with `rayon::join`. Field work:
+`divide_by_binomial` `O(N)`, structured `S` `O(sqrt N * log N)`, all other
+`O(sqrt N)` => `O(N)` field ops, no FFT. The **trait `open`** additionally
+recommits `C_f` (one extra `N`-MSM), so only `core_open` may be used to justify
+the `2N + O(sqrt N)` figure.
 
 **Verifier**: `O(log N)` field ops (two `P_u` evaluations at `zeta,1/zeta`),
-three G1 MSMs (sizes 3, 7, 2), and **2 pairings** (constant, independent of
-`nv`).
+three G1 MSMs (sizes 3, 7, 2), and a single `multi_pairing` product check with
+**2 pairing terms** — one Miller loop + one final exponentiation via
+`E::multi_pairing([ll, -rl], [[1]_2, [tau]_2]) == 1_{G_T}`, the same idiom used
+by the ReciPCS/Gemini/Zeromorph/Samaritan/NestedGridKZG verifiers here. This is
+constant, independent of `nv`. (It is *2 pairing terms in one product check*,
+not "one pairing".)
 
 ## 5. odd `nv`
 
@@ -158,13 +170,93 @@ avoids the point-padding bookkeeping and is the "non-padding rectangular split"
 option the task allows. The odd-`nv` tests (`open_verify_even_and_odd`,
 `open_verify_minimum_nv`, HyperPlonk `nv=5`) exercise this path directly.
 
+### 5.1 Equation-level correctness of the rectangular split
+
+Write the multilinear `fhat` on `mu` variables with the arkworks little-endian
+evaluation vector `a = poly.to_evaluations()`, so `a[idx] = fhat(bits(idx))`
+where bit `k` of `idx` pairs with variable `X_k` and challenge `point[k]`.
+
+**Index decomposition.** With `t = ceil(mu/2)`, `b = 2^t`, `b_row = 2^{mu-t}`,
+every `idx in [0, N)` splits uniquely as `idx = i + j*b` with `i in [0,b)` the
+low `t` bits and `j in [0,b_row)` the high `mu - t` bits. Hence
+`bits(idx) = (bits_t(i), bits_{mu-t}(j))` and, since `eq` factorises over
+disjoint variable blocks,
+```
+eq(idx, point) = eq(i, u1) * eq(j, u2),   u1 = point[0..t], u2 = point[t..mu].
+```
+
+**Univariate twin.** Define `f(X) = sum_{idx<N} a[idx] X^idx`. Grouping by the
+low index,
+```
+f(X) = sum_{i<b} X^i ( sum_{j<b_row} a[i+j b] X^{j b} ) = sum_{i<b} X^i f_i(X^b),
+f_i(X) := sum_{j<b_row} a[i+j b] X^j,   deg f_i < b_row.
+```
+This is exactly the paper's decomposition `f(X) = sum_i X^i f_i(X^b)`; the only
+change for odd `mu` is `deg f_i < b_row = b/2` instead of `< b`. The `b`
+sub-polynomials still occupy the disjoint residues `i + b*Z`, so the sum is a
+genuine degree-`(<N)` univariate.
+
+**Folding (Claim 5.1).** For any `alpha`, reducing each `f_i` mod `(X-alpha)`
+gives `f_i(X) = q_i(X)(X-alpha) + f_i(alpha)`, so
+```
+f(X) = (X^b - alpha) q(X) + g(X),  q(X) = sum_i X^i q_i(X^b),  g(X) = sum_i f_i(alpha) X^i.
+```
+`g` has `deg g < b` because `i < b` (independent of `b_row`), and
+`deg q = (b-1) + (b_row-2) b = N - b - 1 < N`. Thus Claim 5.1 holds verbatim for
+`b_row <= b`; only `deg f_i` (hence the length of each Horner division) shrinks.
+The degree check `D(X) = X^{b-1} g(1/X)` needs only `deg g < b`, which still
+holds, so `D` is a genuine polynomial (no negative powers).
+
+**Restriction / IPA.** `h(X) = sum_{i<b} eq(i,u1) f_i(X)` has `deg h < b_row`,
+and its `X^j` coefficient is `h_j = sum_i eq(i,u1) a[i+j b] = fhat(u1, bits(j))`.
+Therefore
+```
+ghat(u1) = sum_i eq(i,u1) f_i(alpha) = h(alpha),
+hhat(u2) = sum_{j<b_row} eq(j,u2) h_j = sum_{i,j} eq(i,u1)eq(j,u2) a[i+j b] = fhat(point).
+```
+So the two Lagrange inner products `<P_{u1}, g> = h(alpha)` and
+`<P_{u2}, h> = v` are unchanged; only the summation over `j` runs to
+`b_row` (the tail `h_j = 0` for `j >= b_row`).
+
+**Zero padding of `u2`/`h` for the tensor `S`.** The structured `S` kernel
+multiplies by `P_{u2}(1/X) = prod_{k<t}(u2_k X^{-2^k} + (1-u2_k))`. For odd `mu`,
+`u2` has only `mu - t = t - 1` real components; we append a single `0`, whose
+factor is `(0*X^{-2^{t-1}} + 1) = 1`, and we zero-extend `h` from length `b_row`
+to `b`. Neither changes `P_{u2}` (still `[X^i]P_{u2} = eq(i,u2)` with `eq` on the
+real `t-1` variables) nor the Laurent product `h(X) P_{u2}(1/X)` (the extra
+coefficients are `0`). Hence the symmetric-Laurent identity defining `S` is
+identical to the even case.
+
+**BDFG20.** The batched opening depends only on the *degree bounds* of the
+committed `g,h,S,D` (all `< b <= N`) and the three-point set
+`{zeta, 1/zeta, alpha}`; it does not use `b_row`. So `m = Z_T W`,
+`L = (X-z) W'`, and the pairing statement are unaffected.
+
+**SRS bound.** The only `N`-scale committed polynomials are `f` (`deg N-1`), `q`
+(`deg N-b-1`), and `quot_f` (`deg N-2`); all fit in `N` G1 powers. The
+`O(sqrt N)` helpers have `deg < b <= N`. So the SRS degree bound stays `N-1`,
+never `2N-1` — unlike Nova's padding, which forms a size-`2N` square (the extra
+factor lives only in the sqrt-scale helpers here).
+
+**Tests.** `odd_nv_matrix_restriction_matches_evaluation` (mu=3,5,7) checks
+`<eq_row,h> = fhat(point)`; `odd_nv_fold_identity` checks
+`f = (X^b-alpha)q+g` at random points; `odd_nv_structured_s_identity` checks the
+`S` symmetric-Laurent identity at `z` and `1/z`; and
+`odd_nv_rectangular_equals_padded_square` is a **differential** test proving the
+rectangular `g` and `h` equal those computed by the Nova-style zero-padded
+*square* layout (append `N` zeros, `b x b`) on the same original coefficients.
+The full odd-`nv` open/verify (with real `g,h,S,D` commitments and the BDFG20
+opening) is covered by `open_verify_even_and_odd` and the HyperPlonk `nv=5`
+end-to-end test. This is an algebraic derivation of the Mercury §6 premises
+under the rectangular layout; the full AGM / `Q`-DLOG knowledge-soundness
+argument is inherited from the paper and is not re-proved here (see §8).
+
 ## 6. Differences vs Nova (and why)
 
 1. **No FFT.** Nova's `make_s_polynomial` uses `best_fft` over a `2b`-point
    subgroup (requires 2-adic `ROOT_OF_UNITY`). We compute `S` FFT-free from the
-   tensor structure of `P_{u1}, P_{u2}` (§7). Output and transcript are
-   identical; complexity is `O(sqrt N log N)` instead of `O(sqrt N log N)` FFT
-   but with no field-structure requirement. This is what keeps the scheme
+   tensor structure of `P_{u1}, P_{u2}` (§7): same `O(sqrt N log N)` asymptotics,
+   but with **no field-structure requirement**, which keeps the scheme
    `Pairing`-generic with no `FftField` bound.
 2. **arkworks types**, `IOPTranscript`, `Commitment<E>`, `PCSError` instead of
    Nova's `ff`/`serde`/`NovaError`.
@@ -178,6 +270,21 @@ option the task allows. The odd-`nv` tests (`open_verify_even_and_odd`,
 5. **`open_with_commitment`.** The trait `open` re-commits `C_f`; we also expose
    `open_with_commitment` to avoid the extra `N`-MSM when the caller already has
    `C_f` (the benchmark reports both).
+6. **Rectangular non-padding odd-`nv` split** (§5) instead of Nova's zero-padded
+   `2N` square, keeping the committed polynomials and SRS at `N`.
+7. **`multi_pairing` verifier** (matching the other backends here): the final
+   check is one `E::multi_pairing` product of 2 terms rather than two separate
+   `E::pairing` calls. Same algebra `e(ll,[1]_2)=e(rl,[tau]_2)`, one Miller loop.
+8. **Parallel independent commitments.** Under the `parallel` feature, the
+   independent MSM pairs `(comm_q, comm_g)` and `(comm_s, comm_d)` are committed
+   with `rayon::join` (as in Nova). Coefficient slices are borrowed, never
+   copied, and transcript absorption stays sequential, so the Fiat–Shamir order
+   is unchanged.
+9. **Unit-testable BDFG20 core.** The BDFG20 polynomial algebra is factored into
+   pure functions `bdfg_build_m` (`m`, `W = m/Z_T`), `bdfg_build_l`
+   (`m_z`, `L`, `W' = L/(X-z)`), and `bdfg_verify_lhs_pure` (homomorphic
+   reconstruction), so the coefficient-level identities are tested directly
+   (§ tests) instead of only via end-to-end verify.
 
 ## 7. FFT-free structured `S(X)`
 
@@ -193,9 +300,12 @@ kernel used by ReciPCS). By symmetry `g(1/X)P_{u1}(X) = C1(1/X)`, so the
 coefficient of `X^k` (`k>=1`) in the LHS is
 `A_k = C1[b-1+k]+C1[b-1-k] + gamma(C2[b-1+k]+C2[b-1-k])`, and
 `S(X) = sum_{k=1}^{b-1} A_k X^{k-1}` (degree `b-2`). Cost `O(b t)=O(sqrt N log
-N)`, no FFT. A dense `O(b^2)` reference (`make_s_polynomial_dense_reference`)
-computes the full symmetric Laurent product and is checked coefficient-by-
-coefficient against the structured version for `nv=2,4,6,8` in the tests.
+N)`, no FFT. A dense `O(b^2)` reference (`make_s_dense` in the tests) computes
+the full symmetric Laurent product and is checked coefficient-by-coefficient
+against the structured version for `nv=2,4,6,8`
+(`identity_structured_s_matches_dense`), and the `S` symmetric-Laurent identity
+is additionally checked at `z`/`1/z` for odd `nv=3,5,7`
+(`odd_nv_structured_s_identity`).
 
 The kernel `laurent::mul_by_reciprocal_tensor(coeffs, m, r)` returns the Laurent
 buffer of `coeffs(X) * prod_k ((1-r_k)+r_k X^{-2^k})` (length `2^{m+1}-1`,
@@ -220,7 +330,10 @@ formula lives in exactly one place.
 3. Folding relation `f = (X^b-alpha)q + g` at `zeta` via `comm_quot_f`.
 4. BDFG20 batched opening of `{g,h,s,d}` at `{zeta,zeta_inv,alpha}` (all seven
    scalar identities are baked into the reconstructed pairing statement).
-5. The two pairing statements are combined with a fresh challenge `d_pair` and
-   checked with **2 pairings**.
+5. The folding and BDFG20 pairing statements are combined with a fresh challenge
+   `d_pair` into `(ll, rl)` and checked with a single
+   `E::multi_pairing([ll, -rl], [[1]_2, [tau]_2]) == 1_{G_T}` — **2 pairing
+   terms** in one product check (one Miller loop + one final exponentiation),
+   profiled as `mercury_verify_multi_pairing` with `count = 2`.
 
 All of these are necessary and jointly imply `fhat(u)=v`.

@@ -17,8 +17,9 @@
 //!      BDFG20 batched multi-point KZG opening of `{g,h,S,D}` at `{zeta,
 //!      1/zeta, alpha}`.
 //!
-//! The verifier does `O(log N)` field work, three small G1 MSMs, and exactly
-//! **two pairings**. Proof = 8 G1 + 6 field elements. See
+//! The verifier does `O(log N)` field work, three small G1 MSMs, and a single
+//! `multi_pairing` product check with **2 pairing terms** (one Miller loop +
+//! one final exponentiation). Proof = 8 G1 + 6 field elements. See
 //! `docs/hyperplonk_mercury_design.md` for the full mapping to the paper and to
 //! Microsoft Nova's `src/provider/mercury.rs` (MIT), whose Fiat-Shamir schedule
 //! and BDFG20 batching this clean-room arkworks rewrite follows. Nova's
@@ -35,7 +36,9 @@ use crate::pcs::{
 };
 use arithmetic::DenseMultilinearExtension;
 use ark_ec::{
-    pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, AffineRepr, CurveGroup,
+    pairing::{Pairing, PairingOutput},
+    scalar_mul::variable_base::VariableBaseMSM,
+    AffineRepr, CurveGroup,
 };
 use ark_ff::Field;
 use ark_poly::MultilinearExtension;
@@ -566,6 +569,43 @@ fn validate_zbdfg<F: Field>(z: F, zeta: F, zeta_inv: F, alpha: F) -> Result<(), 
     Ok(())
 }
 
+/// Commit to two independent polynomials, in parallel under the `parallel`
+/// feature (following Nova's `rayon::join` of `(comm_q, comm_g)` and
+/// `(comm_s, comm_d)`). The coefficient slices are borrowed, never copied. Each
+/// commitment keeps its own profiling phase / real MSM `count`; transcript
+/// absorption stays sequential at the call site, so the Fiat-Shamir order is
+/// unaffected.
+#[allow(clippy::too_many_arguments)]
+fn commit_two<E: Pairing>(
+    pp: &MercuryProverParam<E>,
+    a: &[E::ScalarField],
+    phase_a: &'static str,
+    note_a: &'static str,
+    b: &[E::ScalarField],
+    phase_b: &'static str,
+    note_b: &'static str,
+    mu: usize,
+    n: usize,
+) -> Result<(E::G1Affine, E::G1Affine), PCSError> {
+    let commit_a = || {
+        let _t = ScopedTimer::new(BACKEND, mu, n, phase_a, a.len(), note_a);
+        pp.commit(a)
+    };
+    let commit_b = || {
+        let _t = ScopedTimer::new(BACKEND, mu, n, phase_b, b.len(), note_b);
+        pp.commit(b)
+    };
+    #[cfg(feature = "parallel")]
+    {
+        let (ra, rb) = rayon::join(commit_a, commit_b);
+        Ok((ra?, rb?))
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        Ok((commit_a()?, commit_b()?))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn mercury_core_open<E: Pairing>(
     pp: &MercuryProverParam<E>,
@@ -628,26 +668,18 @@ fn mercury_core_open<E: Pairing>(
     let _t_div = ScopedTimer::new(BACKEND, mu, n, "mercury_open_divide_by_binomial", n, "div");
     let (g_poly, q_poly) = divide_by_binomial(&coeffs[..n], b, b_row, alpha);
     drop(_t_div);
-    let _t_cq = ScopedTimer::new(
-        BACKEND,
-        mu,
-        n,
+    // comm_q and comm_g are independent MSMs -> committed in parallel.
+    let (comm_q, comm_g) = commit_two(
+        pp,
+        &q_poly,
         "mercury_open_commit_q",
-        q_poly.len(),
         "KZG-q",
-    );
-    let comm_q = pp.commit(&q_poly)?;
-    drop(_t_cq);
-    let _t_cg = ScopedTimer::new(
-        BACKEND,
+        &g_poly,
+        "mercury_open_commit_g",
+        "KZG-g",
         mu,
         n,
-        "mercury_open_commit_g",
-        g_poly.len(),
-        "KZG-g",
-    );
-    let comm_g = pp.commit(&g_poly)?;
-    drop(_t_cg);
+    )?;
     transcript.append_serializable_element(L_Q, &comm_q)?;
     transcript.append_serializable_element(L_G, &comm_g)?;
 
@@ -659,27 +691,19 @@ fn mercury_core_open<E: Pairing>(
     let _t_s = ScopedTimer::new(BACKEND, mu, n, "mercury_open_compute_s", b, "S");
     let s_poly = make_s_polynomial_structured(&g_poly, &h_poly, u1, &u2_full, t, b, gamma);
     drop(_t_s);
-    let _t_cs = ScopedTimer::new(
-        BACKEND,
-        mu,
-        n,
-        "mercury_open_commit_s",
-        s_poly.len(),
-        "KZG-s",
-    );
-    let comm_s = pp.commit(&s_poly)?;
-    drop(_t_cs);
     let d_poly = reverse_coeffs(&g_poly, b);
-    let _t_cd = ScopedTimer::new(
-        BACKEND,
+    // comm_s and comm_d are independent MSMs -> committed in parallel.
+    let (comm_s, comm_d) = commit_two(
+        pp,
+        &s_poly,
+        "mercury_open_commit_s",
+        "KZG-s",
+        &d_poly,
+        "mercury_open_commit_d",
+        "KZG-d",
         mu,
         n,
-        "mercury_open_commit_d",
-        d_poly.len(),
-        "KZG-d",
-    );
-    let comm_d = pp.commit(&d_poly)?;
-    drop(_t_cd);
+    )?;
     transcript.append_serializable_element(L_S, &comm_s)?;
     transcript.append_serializable_element(L_D, &comm_d)?;
 
@@ -840,14 +864,31 @@ fn bdfg_star_polys<F: Field>(
     Ok((g_star, h_star, s_star, d_star))
 }
 
-fn bdfg_prove<E: Pairing>(
-    pp: &MercuryProverParam<E>,
-    inp: &BdfgProverInput<'_, E::ScalarField>,
-    mu: usize,
-    n: usize,
-    transcript: &mut IOPTranscript<E::ScalarField>,
-) -> Result<(E::G1Affine, E::G1Affine), PCSError> {
-    let beta = transcript.get_and_append_challenge(L_BETA)?;
+/// Pure BDFG20 first-round polynomials: the star interpolants, the combined
+/// numerator `m(X)`, and the first witness `W(X) = m(X) / Z_T(X)` with
+/// `Z_T(X) = (X-alpha)(X-zeta)(X-zeta_inv)`. No transcript / no commitment, so
+/// this is unit-testable in isolation (see `tests::bdfg_*`).
+///
+/// `m(X) = Z_{T\S_g}(X)(g-g*) + beta Z_{T\S_h}(X)(h-h*)
+///         + beta^2 Z_{T\S_s}(X)(s-s*) + beta^3 Z_{T\S_d}(X)(d-d*)`
+/// with `Z_{T\S_g}=(X-alpha)`, `Z_{T\S_h}=1`, `Z_{T\S_s}=(X-alpha)`,
+/// `Z_{T\S_d}=(X-alpha)(X-zeta_inv)`.
+struct BdfgMPolys<F: Field> {
+    g_star: Vec<F>,
+    h_star: Vec<F>,
+    s_star: Vec<F>,
+    d_star: Vec<F>,
+    /// The combined numerator `m(X)`. Consumed by the coefficient-level tests
+    /// (`m == Z_T * W`); the prover only needs `quot_m`.
+    #[allow(dead_code)]
+    m: Vec<F>,
+    quot_m: Vec<F>,
+}
+
+fn bdfg_build_m<F: Field>(
+    inp: &BdfgProverInput<'_, F>,
+    beta: F,
+) -> Result<BdfgMPolys<F>, PCSError> {
     let beta2 = beta * beta;
     let beta3 = beta2 * beta;
 
@@ -865,32 +906,27 @@ fn bdfg_prove<E: Pairing>(
         inp.d_zeta,
     )?;
 
-    let _t_bq = ScopedTimer::new(BACKEND, mu, n, "mercury_open_build_batch_quotient", 1, "m");
-    // m(X) = Z_{T\S_g}(g-g*) + beta Z_{T\S_h}(h-h*) + beta^2 Z_{T\S_s}(s-s*)
-    //        + beta^3 Z_{T\S_d}(d-d*)
-    // Z_{T\S_g} = (X-alpha); Z_{T\S_h}=1; Z_{T\S_s}=(X-alpha);
-    // Z_{T\S_d} = (X-alpha)(X-zeta_inv).
     let diff_g = poly_sub(inp.g, &g_star);
     let diff_h = poly_sub(inp.h, &h_star);
     let diff_s = poly_sub(inp.s, &s_star);
     let diff_d = poly_sub(inp.d, &d_star);
 
     let term_g = mul_by_linear(&diff_g, inp.alpha);
-    let term_h = diff_h.clone();
+    let term_h = diff_h;
     let term_s = mul_by_linear(&diff_s, inp.alpha);
     let term_d = {
         let tmp = mul_by_linear(&diff_d, inp.alpha);
         mul_by_linear(&tmp, inp.zeta_inv)
     };
 
-    let mut m_poly: Vec<E::ScalarField> = Vec::new();
-    add_scaled(&mut m_poly, &term_g, E::ScalarField::one());
-    add_scaled(&mut m_poly, &term_h, beta);
-    add_scaled(&mut m_poly, &term_s, beta2);
-    add_scaled(&mut m_poly, &term_d, beta3);
+    let mut m: Vec<F> = Vec::new();
+    add_scaled(&mut m, &term_g, F::one());
+    add_scaled(&mut m, &term_h, beta);
+    add_scaled(&mut m, &term_s, beta2);
+    add_scaled(&mut m, &term_d, beta3);
 
     // quot_m = m / (X-alpha)(X-zeta)(X-zeta_inv)
-    let (m1, r1) = divide_by_linear(&m_poly, inp.alpha);
+    let (m1, r1) = divide_by_linear(&m, inp.alpha);
     let (m2, r2) = divide_by_linear(&m1, inp.zeta);
     let (quot_m, r3) = divide_by_linear(&m2, inp.zeta_inv);
     if !r1.is_zero() || !r2.is_zero() || !r3.is_zero() {
@@ -898,6 +934,79 @@ fn bdfg_prove<E: Pairing>(
             "BDFG20 m(X) not divisible by Z_T".to_string(),
         ));
     }
+    Ok(BdfgMPolys {
+        g_star,
+        h_star,
+        s_star,
+        d_star,
+        m,
+        quot_m,
+    })
+}
+
+/// Pure BDFG20 second-round polynomials: `L(X) = m_z(X) - Z_T(z) W(X)` and the
+/// second witness `W'(X) = L(X)/(X-z)`. No transcript / no commitment.
+struct BdfgLPolys<F: Field> {
+    /// `L(X)`. Consumed by the coefficient-level tests (`L == (X-z) * W'`); the
+    /// prover only needs `quot_l`.
+    #[allow(dead_code)]
+    l: Vec<F>,
+    quot_l: Vec<F>,
+}
+
+fn bdfg_build_l<F: Field>(
+    inp: &BdfgProverInput<'_, F>,
+    mpolys: &BdfgMPolys<F>,
+    beta: F,
+    z: F,
+) -> Result<BdfgLPolys<F>, PCSError> {
+    let beta2 = beta * beta;
+    let beta3 = beta2 * beta;
+    let zg_z = z - inp.alpha;
+    let zh_z = F::one();
+    let zs_z = z - inp.alpha;
+    let zd_z = (z - inp.zeta_inv) * (z - inp.alpha);
+    let zt_z = zd_z * (z - inp.zeta);
+
+    let g_star_z = poly_eval(&mpolys.g_star, z);
+    let h_star_z = poly_eval(&mpolys.h_star, z);
+    let s_star_z = poly_eval(&mpolys.s_star, z);
+    let d_star_z = poly_eval(&mpolys.d_star, z);
+
+    // m_z(X) = Zg(z)(g - g*(z)) + beta Zh(z)(h - h*(z)) + beta^2 Zs(z)(s - s*(z))
+    //          + beta^3 Zd(z)(d - d*(z))  (built directly into `l`).
+    let mut l: Vec<F> = Vec::new();
+    add_scaled(&mut l, inp.g, zg_z);
+    subtract_const(&mut l, zg_z * g_star_z);
+    add_scaled(&mut l, inp.h, beta * zh_z);
+    subtract_const(&mut l, beta * zh_z * h_star_z);
+    add_scaled(&mut l, inp.s, beta2 * zs_z);
+    subtract_const(&mut l, beta2 * zs_z * s_star_z);
+    add_scaled(&mut l, inp.d, beta3 * zd_z);
+    subtract_const(&mut l, beta3 * zd_z * d_star_z);
+
+    // L(X) = m_z(X) - Z_T(z) quot_m(X)
+    add_scaled(&mut l, &mpolys.quot_m, -zt_z);
+    let (quot_l, rl) = divide_by_linear(&l, z);
+    if !rl.is_zero() {
+        return Err(PCSError::InvalidProver(
+            "BDFG20 L(X) not divisible by (X - z)".to_string(),
+        ));
+    }
+    Ok(BdfgLPolys { l, quot_l })
+}
+
+fn bdfg_prove<E: Pairing>(
+    pp: &MercuryProverParam<E>,
+    inp: &BdfgProverInput<'_, E::ScalarField>,
+    mu: usize,
+    n: usize,
+    transcript: &mut IOPTranscript<E::ScalarField>,
+) -> Result<(E::G1Affine, E::G1Affine), PCSError> {
+    let beta = transcript.get_and_append_challenge(L_BETA)?;
+
+    let _t_bq = ScopedTimer::new(BACKEND, mu, n, "mercury_open_build_batch_quotient", 1, "m");
+    let mpolys = bdfg_build_m(inp, beta)?;
     drop(_t_bq);
 
     let _t_cw = ScopedTimer::new(
@@ -905,10 +1014,10 @@ fn bdfg_prove<E: Pairing>(
         mu,
         n,
         "mercury_open_commit_batch_w",
-        quot_m.len(),
+        mpolys.quot_m.len(),
         "KZG-w",
     );
-    let comm_w = pp.commit(&quot_m)?;
+    let comm_w = pp.commit(&mpolys.quot_m)?;
     drop(_t_cw);
     transcript.append_serializable_element(L_W, &comm_w)?;
 
@@ -916,37 +1025,7 @@ fn bdfg_prove<E: Pairing>(
     validate_zbdfg(z, inp.zeta, inp.zeta_inv, inp.alpha)?;
 
     let _t_bf = ScopedTimer::new(BACKEND, mu, n, "mercury_open_build_final_quotient", 1, "L");
-    // m_z(X) = Zg(z)(g - g*(z)) + beta Zh(z)(h - h*(z)) + beta^2 Zs(z)(s - s*(z))
-    //          + beta^3 Zd(z)(d - d*(z))
-    let zg_z = z - inp.alpha;
-    let zh_z = E::ScalarField::one();
-    let zs_z = z - inp.alpha;
-    let zd_z = (z - inp.zeta_inv) * (z - inp.alpha);
-    let zt_z = zd_z * (z - inp.zeta);
-
-    let g_star_z = poly_eval(&g_star, z);
-    let h_star_z = poly_eval(&h_star, z);
-    let s_star_z = poly_eval(&s_star, z);
-    let d_star_z = poly_eval(&d_star, z);
-
-    let mut mz: Vec<E::ScalarField> = Vec::new();
-    add_scaled(&mut mz, inp.g, zg_z);
-    subtract_const(&mut mz, zg_z * g_star_z);
-    add_scaled(&mut mz, inp.h, beta * zh_z);
-    subtract_const(&mut mz, beta * zh_z * h_star_z);
-    add_scaled(&mut mz, inp.s, beta2 * zs_z);
-    subtract_const(&mut mz, beta2 * zs_z * s_star_z);
-    add_scaled(&mut mz, inp.d, beta3 * zd_z);
-    subtract_const(&mut mz, beta3 * zd_z * d_star_z);
-
-    // L(X) = m_z(X) - Z_T(z) quot_m(X)
-    add_scaled(&mut mz, &quot_m, -zt_z);
-    let (quot_l, rl) = divide_by_linear(&mz, z);
-    if !rl.is_zero() {
-        return Err(PCSError::InvalidProver(
-            "BDFG20 L(X) not divisible by (X - z)".to_string(),
-        ));
-    }
+    let lpolys = bdfg_build_l(inp, &mpolys, beta, z)?;
     drop(_t_bf);
 
     let _t_cwp = ScopedTimer::new(
@@ -954,10 +1033,10 @@ fn bdfg_prove<E: Pairing>(
         mu,
         n,
         "mercury_open_commit_batch_w_prime",
-        quot_l.len(),
+        lpolys.quot_l.len(),
         "KZG-wp",
     );
-    let comm_w_prime = pp.commit(&quot_l)?;
+    let comm_w_prime = pp.commit(&lpolys.quot_l)?;
     drop(_t_cwp);
 
     Ok((comm_w, comm_w_prime))
@@ -1096,17 +1175,26 @@ fn mercury_core_verify<E: Pairing>(
     let d_pair = tr.get_and_append_challenge(L_DPAIR)?;
 
     let ll = (lhs_1_1 + lhs_1_2 * d_pair).into_affine();
-    let rl = (lhs_2_1 + lhs_2_2 * d_pair).into_affine();
+    // Negate the right side so the product form
+    //   e(ll, [1]_2) * e(-rl, [tau]_2) = 1_{G_T}
+    // is equivalent to the two-pairing equality e(ll, [1]_2) == e(rl, [tau]_2).
+    // This is the same multi_pairing idiom used by the ReciPCS / Gemini /
+    // Zeromorph / Samaritan / NestedGridKZG verifiers in this repo: one Miller
+    // loop + one final exponentiation instead of two separate pairings.
+    let neg_rl = (-(lhs_2_1 + lhs_2_2 * d_pair)).into_affine();
 
-    // e(ll, [1]_2) == e(rl, [tau]_2)  (two pairings)
-    let _t_p1 = ScopedTimer::new(BACKEND, mu, n, "mercury_verify_pairing_1", 1, "pairing");
-    let pl = E::pairing(ll, vp.g2_one);
-    drop(_t_p1);
-    let _t_p2 = ScopedTimer::new(BACKEND, mu, n, "mercury_verify_pairing_2", 1, "pairing");
-    let pr = E::pairing(rl, vp.g2_tau);
-    drop(_t_p2);
-
-    Ok(pl == pr)
+    let _t_mp = ScopedTimer::new(
+        BACKEND,
+        mu,
+        n,
+        "mercury_verify_multi_pairing",
+        2,
+        "2-term-product",
+    );
+    let ok = E::multi_pairing([ll, neg_rl], [vp.g2_one, vp.g2_tau])
+        == PairingOutput(E::TargetField::one());
+    drop(_t_mp);
+    Ok(ok)
 }
 
 struct BdfgVerifyEvals<F: Field> {
@@ -1137,7 +1225,23 @@ fn bdfg_verify_lhs<E: Pairing>(
     tr.append_serializable_element(L_W, &proof.comm_w)?;
     let z = tr.get_and_append_challenge(L_ZBDFG)?;
     validate_zbdfg(z, ev.zeta, ev.zeta_inv, ev.alpha)?;
+    bdfg_verify_lhs_pure(vp, proof, &ev, beta, z, mu, n)
+}
 
+/// Pure homomorphic reconstruction of the BDFG20 pairing group elements with
+/// the challenges `beta, z` given explicitly (no transcript). Algebraically
+/// `lhs_1_2 = [tau * W'(tau)]_1` and `lhs_2_2 = [W'(tau)]_1`, so the pairing
+/// check `e(lhs_1_2,[1]_2) = e(lhs_2_2,[tau]_2)` encodes `L(X) = (X-z)W'(X)`.
+/// Unit-tested directly against commitments in `tests::bdfg_*`.
+fn bdfg_verify_lhs_pure<E: Pairing>(
+    vp: &MercuryVerifierParam<E>,
+    proof: &MercuryProof<E>,
+    ev: &BdfgVerifyEvals<E::ScalarField>,
+    beta: E::ScalarField,
+    z: E::ScalarField,
+    mu: usize,
+    n: usize,
+) -> Result<(E::G1, E::G1), PCSError> {
     let (g_star, h_star, s_star, d_star) = bdfg_star_polys(
         ev.zeta,
         ev.zeta_inv,

@@ -1,12 +1,24 @@
 //! Mercury PCS correctness and negative tests.
 //!
-//! Covers: even/odd/min `nv`, random property tests, the paper polynomial
-//! identities (`f = (X^b-alpha)q + g`, structured `S` vs dense reference), the
-//! BDFG20 batch divisibility identity, every negative case (wrong value / point
-//! / commitment, tampering each proof field, swapped evaluations), malformed
-//! `mu`/lengths, vk/pk capacity, statement binding, serialization roundtrip,
-//! proof-size assertion, and `catch_unwind` panic-freedom. Sumcheck batch
-//! adapter tests exercise `multi_open` / `batch_verify`.
+//! Covers:
+//! - even/odd/min `nv`, random property tests;
+//! - the paper polynomial identities (`f = (X^b-alpha)q + g`, structured `S` vs
+//!   dense reference, the `S` symmetric-Laurent identity at `z`/`z^-1`);
+//! - **coefficient-level BDFG20 algebra** (`m == Z_T * W`, `L == (X-z) * W'`,
+//!   zero remainders, `W`/`W'` commitment equality, and the verifier's
+//!   homomorphic reconstruction `lhs_1 == [tau W'(tau)]`, `lhs_2 ==
+//!   [W'(tau)]`), plus BDFG20 negative cases (inconsistent evals break
+//!   divisibility; a wrong challenge breaks the verifier reconstruction) —
+//!   these do NOT rely on the end-to-end verify to hide a symbolic error;
+//! - **odd-`nv` rectangular-split invariants** (`mu = 3,5,7`): matrix
+//!   restriction vs multilinear evaluation, the fold identity, the `S`
+//!   identity, and a differential check that the rectangular `g,h` equal the
+//!   Nova-style zero-padded *square* layout on the original coefficients;
+//! - every negative case (wrong value / point / commitment, tampering each
+//!   proof field including the two BDFG20 witnesses, swapped evaluations),
+//!   malformed `mu`/lengths, vk/pk capacity, statement binding, serialization
+//!   roundtrip, proof-size assertion, and `catch_unwind` panic-freedom.
+//!   Sumcheck batch adapter tests exercise `multi_open` / `batch_verify`.
 
 use super::*;
 use ark_bls12_381::{Bls12_381, Fr};
@@ -707,4 +719,444 @@ fn catch_unwind_random_proofs() -> Result<(), PCSError> {
         assert!(res.is_ok());
     }
     Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// BDFG20 coefficient-level algebraic tests (independent of end-to-end verify)
+// ════════════════════════════════════════════════════════════════════
+
+/// Naive polynomial multiplication reference.
+fn poly_mul(a: &[Fr], b: &[Fr]) -> Vec<Fr> {
+    if a.is_empty() || b.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Fr::zero(); a.len() + b.len() - 1];
+    for (i, &ai) in a.iter().enumerate() {
+        for (j, &bj) in b.iter().enumerate() {
+            out[i + j] += ai * bj;
+        }
+    }
+    out
+}
+
+fn poly_trim(v: &[Fr]) -> Vec<Fr> {
+    let mut e = v.len();
+    while e > 0 && v[e - 1].is_zero() {
+        e -= 1;
+    }
+    v[..e].to_vec()
+}
+
+fn assert_poly_eq(a: &[Fr], b: &[Fr], msg: &str) {
+    assert_eq!(poly_trim(a), poly_trim(b), "{msg}");
+}
+
+/// `(X - alpha)(X - zeta)(X - zeta_inv)`.
+fn z_t_poly(alpha: Fr, zeta: Fr, zeta_inv: Fr) -> Vec<Fr> {
+    let a = poly_mul(&[-alpha, Fr::one()], &[-zeta, Fr::one()]);
+    poly_mul(&a, &[-zeta_inv, Fr::one()])
+}
+
+/// Non-degenerate `(alpha, zeta, zeta_inv, beta, z)`: `zeta != 0`, `zeta^2 !=
+/// 1`, and `z`/`alpha` distinct from the three interpolation nodes.
+fn nondegenerate_challenges(rng: &mut impl Rng) -> (Fr, Fr, Fr, Fr, Fr) {
+    loop {
+        let zeta = Fr::rand(rng);
+        if zeta.is_zero() {
+            continue;
+        }
+        let zeta_inv = zeta.inverse().unwrap();
+        if zeta == zeta_inv {
+            continue;
+        }
+        let alpha = Fr::rand(rng);
+        if alpha == zeta || alpha == zeta_inv {
+            continue;
+        }
+        let z = Fr::rand(rng);
+        if z == zeta || z == zeta_inv || z == alpha {
+            continue;
+        }
+        return (alpha, zeta, zeta_inv, Fr::rand(rng), z);
+    }
+}
+
+#[test]
+fn bdfg_coefficient_identities_and_commitments() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    for mu in [2usize, 3, 4, 5] {
+        let (_t, b, _b_row, n) = mercury_dims(mu).unwrap();
+        let (ck, vk) = setup(mu);
+
+        // Random committed polynomials with the real Mercury degree bounds.
+        let g: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+        let h: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+        let s: Vec<Fr> = (0..b - 1).map(|_| Fr::rand(&mut rng)).collect();
+        let d: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+
+        let (alpha, zeta, zeta_inv, beta, z) = nondegenerate_challenges(&mut rng);
+
+        // Evals consistent with the polynomials (so m is divisible by Z_T).
+        let g_zeta = poly_eval(&g, zeta);
+        let g_zeta_inv = poly_eval(&g, zeta_inv);
+        let h_zeta = poly_eval(&h, zeta);
+        let h_zeta_inv = poly_eval(&h, zeta_inv);
+        let h_alpha = poly_eval(&h, alpha);
+        let s_zeta = poly_eval(&s, zeta);
+        let s_zeta_inv = poly_eval(&s, zeta_inv);
+        let d_zeta = poly_eval(&d, zeta);
+
+        let inp = BdfgProverInput {
+            g: &g,
+            h: &h,
+            s: &s,
+            d: &d,
+            g_zeta,
+            g_zeta_inv,
+            h_zeta,
+            h_zeta_inv,
+            h_alpha,
+            s_zeta,
+            s_zeta_inv,
+            d_zeta,
+            zeta,
+            zeta_inv,
+            alpha,
+        };
+
+        // Round 1: m = Z_T * W  (coefficient level).
+        let mpolys = bdfg_build_m(&inp, beta)?;
+        let zt = z_t_poly(alpha, zeta, zeta_inv);
+        assert_poly_eq(
+            &mpolys.m,
+            &poly_mul(&zt, &mpolys.quot_m),
+            &format!("m != Z_T * W at mu={mu}"),
+        );
+
+        // Round 2: L = (X - z) * W'  (coefficient level).
+        let lpolys = bdfg_build_l(&inp, &mpolys, beta, z)?;
+        assert_poly_eq(
+            &lpolys.l,
+            &poly_mul(&[-z, Fr::one()], &lpolys.quot_l),
+            &format!("L != (X-z) W' at mu={mu}"),
+        );
+
+        // Commitments of the reference witnesses.
+        let comm_w = ck.commit(&mpolys.quot_m)?;
+        let comm_w_prime = ck.commit(&lpolys.quot_l)?;
+
+        // Verifier homomorphic reconstruction, with the same (beta, z).
+        let proof = MercuryProof::<E> {
+            comm_h: ck.commit(&h)?,
+            comm_g: ck.commit(&g)?,
+            comm_q: <E as Pairing>::G1Affine::default(),
+            comm_s: ck.commit(&s)?,
+            comm_d: ck.commit(&d)?,
+            comm_quot_f: <E as Pairing>::G1Affine::default(),
+            comm_w,
+            comm_w_prime,
+            g_zeta,
+            g_zeta_inv,
+            h_zeta,
+            h_zeta_inv,
+            s_zeta,
+            s_zeta_inv,
+            mu,
+        };
+        let ev = BdfgVerifyEvals {
+            zeta,
+            zeta_inv,
+            alpha,
+            g_zeta,
+            g_zeta_inv,
+            h_zeta,
+            h_zeta_inv,
+            h_alpha,
+            s_zeta,
+            s_zeta_inv,
+            d_zeta,
+        };
+        let (lhs_1, lhs_2) = bdfg_verify_lhs_pure(&vk, &proof, &ev, beta, z, mu, n)?;
+        // lhs_2 = [W'(tau)]_1 and lhs_1 = [tau*W'(tau)]_1 = commit(X * W').
+        assert_eq!(lhs_2.into_affine(), comm_w_prime, "lhs_2 != [W'(tau)]");
+        let mut x_wprime = vec![Fr::zero()];
+        x_wprime.extend_from_slice(&lpolys.quot_l);
+        assert_eq!(
+            lhs_1.into_affine(),
+            ck.commit(&x_wprime)?,
+            "lhs_1 != [tau W'(tau)] = commit(X * W')"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn bdfg_reject_inconsistent_evals() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let mu = 4;
+    let (_t, b, _b_row, _n) = mercury_dims(mu).unwrap();
+    let g: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let h: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let s: Vec<Fr> = (0..b - 1).map(|_| Fr::rand(&mut rng)).collect();
+    let d: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let (alpha, zeta, zeta_inv, beta, _z) = nondegenerate_challenges(&mut rng);
+
+    let mk = |g_zeta: Fr, h_alpha: Fr| BdfgProverInput {
+        g: &g,
+        h: &h,
+        s: &s,
+        d: &d,
+        g_zeta,
+        g_zeta_inv: poly_eval(&g, zeta_inv),
+        h_zeta: poly_eval(&h, zeta),
+        h_zeta_inv: poly_eval(&h, zeta_inv),
+        h_alpha,
+        s_zeta: poly_eval(&s, zeta),
+        s_zeta_inv: poly_eval(&s, zeta_inv),
+        d_zeta: poly_eval(&d, zeta),
+        zeta,
+        zeta_inv,
+        alpha,
+    };
+
+    // Correct evals: divisible.
+    assert!(bdfg_build_m(&mk(poly_eval(&g, zeta), poly_eval(&h, alpha)), beta).is_ok());
+    // Wrong g_zeta: m no longer vanishes at zeta -> not divisible by (X - zeta).
+    let bad_g = poly_eval(&g, zeta) + Fr::one();
+    assert!(
+        bdfg_build_m(&mk(bad_g, poly_eval(&h, alpha)), beta).is_err(),
+        "wrong g_zeta must break divisibility"
+    );
+    // Wrong h_alpha: m no longer vanishes at alpha -> not divisible by (X - alpha).
+    let bad_h_alpha = poly_eval(&h, alpha) + Fr::one();
+    assert!(
+        bdfg_build_m(&mk(poly_eval(&g, zeta), bad_h_alpha), beta).is_err(),
+        "wrong h_alpha must break divisibility"
+    );
+    Ok(())
+}
+
+#[test]
+fn bdfg_verifier_reconstruction_rejects_wrong_challenge() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let mu = 4;
+    let (_t, b, _b_row, n) = mercury_dims(mu).unwrap();
+    let (ck, vk) = setup(mu);
+    let g: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let h: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let s: Vec<Fr> = (0..b - 1).map(|_| Fr::rand(&mut rng)).collect();
+    let d: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+    let (alpha, zeta, zeta_inv, beta, z) = nondegenerate_challenges(&mut rng);
+    let g_zeta = poly_eval(&g, zeta);
+    let g_zeta_inv = poly_eval(&g, zeta_inv);
+    let h_zeta = poly_eval(&h, zeta);
+    let h_zeta_inv = poly_eval(&h, zeta_inv);
+    let h_alpha = poly_eval(&h, alpha);
+    let s_zeta = poly_eval(&s, zeta);
+    let s_zeta_inv = poly_eval(&s, zeta_inv);
+    let d_zeta = poly_eval(&d, zeta);
+    let inp = BdfgProverInput {
+        g: &g,
+        h: &h,
+        s: &s,
+        d: &d,
+        g_zeta,
+        g_zeta_inv,
+        h_zeta,
+        h_zeta_inv,
+        h_alpha,
+        s_zeta,
+        s_zeta_inv,
+        d_zeta,
+        zeta,
+        zeta_inv,
+        alpha,
+    };
+    let mpolys = bdfg_build_m(&inp, beta)?;
+    let lpolys = bdfg_build_l(&inp, &mpolys, beta, z)?;
+    let comm_w = ck.commit(&mpolys.quot_m)?;
+    let comm_w_prime = ck.commit(&lpolys.quot_l)?;
+    let proof = MercuryProof::<E> {
+        comm_h: ck.commit(&h)?,
+        comm_g: ck.commit(&g)?,
+        comm_q: <E as Pairing>::G1Affine::default(),
+        comm_s: ck.commit(&s)?,
+        comm_d: ck.commit(&d)?,
+        comm_quot_f: <E as Pairing>::G1Affine::default(),
+        comm_w,
+        comm_w_prime,
+        g_zeta,
+        g_zeta_inv,
+        h_zeta,
+        h_zeta_inv,
+        s_zeta,
+        s_zeta_inv,
+        mu,
+    };
+    let ev = BdfgVerifyEvals {
+        zeta,
+        zeta_inv,
+        alpha,
+        g_zeta,
+        g_zeta_inv,
+        h_zeta,
+        h_zeta_inv,
+        h_alpha,
+        s_zeta,
+        s_zeta_inv,
+        d_zeta,
+    };
+    let mut x_wprime = vec![Fr::zero()];
+    x_wprime.extend_from_slice(&lpolys.quot_l);
+    let target = ck.commit(&x_wprime)?;
+
+    // Correct challenge reproduces [tau W'(tau)].
+    let (lhs_1_ok, _) = bdfg_verify_lhs_pure(&vk, &proof, &ev, beta, z, mu, n)?;
+    assert_eq!(lhs_1_ok.into_affine(), target);
+
+    // A wrong beta reconstructs a different group element.
+    let (lhs_1_bad, _) = bdfg_verify_lhs_pure(&vk, &proof, &ev, beta + Fr::one(), z, mu, n)?;
+    assert_ne!(
+        lhs_1_bad.into_affine(),
+        target,
+        "wrong beta must break the reconstruction"
+    );
+    // A wrong z as well.
+    let z2 = {
+        let mut z2 = z + Fr::one();
+        while z2 == zeta || z2 == zeta_inv || z2 == alpha {
+            z2 += Fr::one();
+        }
+        z2
+    };
+    let (lhs_1_bad_z, _) = bdfg_verify_lhs_pure(&vk, &proof, &ev, beta, z2, mu, n)?;
+    assert_ne!(
+        lhs_1_bad_z.into_affine(),
+        target,
+        "wrong z must break the reconstruction"
+    );
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// odd-nv rectangular-split invariant / differential tests
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn odd_nv_matrix_restriction_matches_evaluation() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    for mu in [3usize, 5, 7] {
+        let (t, b, b_row, _n) = mercury_dims(mu).unwrap();
+        assert_eq!(b_row, b / 2, "odd mu must give a b x (b/2) rectangle");
+        let p = rand_poly(mu, &mut rng);
+        let pt = rand_point(mu, &mut rng);
+        let coeffs = p.to_evaluations();
+        let u1 = &pt[..t];
+        let u2 = &pt[t..];
+        let eq_col = build_eq_vec::<Fr>(u1, b);
+        let eq_row = build_eq_vec::<Fr>(u2, b_row);
+        let h = compute_h(&coeffs, &eq_col, b_row, b);
+        // hhat(u2) = <eq_row, h> must equal the multilinear evaluation.
+        let mut v_check = Fr::zero();
+        for (j, &e) in eq_row.iter().enumerate().take(b_row) {
+            v_check += e * h[j];
+        }
+        assert_eq!(
+            v_check,
+            p.evaluate(&pt).unwrap(),
+            "restriction IPA at mu={mu}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn odd_nv_fold_identity() {
+    let mut rng = test_rng();
+    for mu in [3usize, 5, 7] {
+        let (_t, b, b_row, n) = mercury_dims(mu).unwrap();
+        let coeffs: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let alpha = Fr::rand(&mut rng);
+        let (g, q) = divide_by_binomial(&coeffs, b, b_row, alpha);
+        assert_eq!(g.len(), b);
+        assert!(g.len() >= b_row, "g degree < b holds");
+        for _ in 0..4 {
+            let r = Fr::rand(&mut rng);
+            let lhs = poly_eval(&coeffs, r);
+            let rhs = (r.pow([b as u64]) - alpha) * poly_eval(&q, r) + poly_eval(&g, r);
+            assert_eq!(lhs, rhs, "fold identity at mu={mu}");
+        }
+    }
+}
+
+#[test]
+fn odd_nv_structured_s_identity() {
+    let mut rng = test_rng();
+    for mu in [3usize, 5, 7] {
+        let (t, b, b_row, _n) = mercury_dims(mu).unwrap();
+        let g: Vec<Fr> = (0..b).map(|_| Fr::rand(&mut rng)).collect();
+        let mut h: Vec<Fr> = (0..b_row).map(|_| Fr::rand(&mut rng)).collect();
+        h.resize(b, Fr::zero());
+        let u1: Vec<Fr> = (0..t).map(|_| Fr::rand(&mut rng)).collect();
+        let u2: Vec<Fr> = (0..(mu - t)).map(|_| Fr::rand(&mut rng)).collect();
+        let mut u2_full = u2.clone();
+        u2_full.resize(t, Fr::zero());
+        let gamma = Fr::rand(&mut rng);
+        let s = make_s_polynomial_structured(&g, &h, &u1, &u2_full, t, b, gamma);
+
+        let eq_col = build_eq_vec::<Fr>(&u1, b);
+        let eq_row = build_eq_vec::<Fr>(&u2, b_row);
+        let ip_g: Fr = g.iter().zip(eq_col.iter()).map(|(a, c)| *a * *c).sum();
+        let ip_h: Fr = h
+            .iter()
+            .take(b_row)
+            .zip(eq_row.iter())
+            .map(|(a, c)| *a * *c)
+            .sum();
+
+        let z = Fr::rand(&mut rng);
+        let z_inv = z.inverse().unwrap();
+        let pu1_z = pu_eval(&u1, z);
+        let pu1_zi = pu_eval(&u1, z_inv);
+        let pu2_z = pu_eval(&u2, z);
+        let pu2_zi = pu_eval(&u2, z_inv);
+        let lhs = poly_eval(&g, z) * pu1_zi
+            + poly_eval(&g, z_inv) * pu1_z
+            + gamma * (poly_eval(&h, z) * pu2_zi + poly_eval(&h, z_inv) * pu2_z);
+        let rhs =
+            (ip_g + gamma * ip_h).double() + z * poly_eval(&s, z) + z_inv * poly_eval(&s, z_inv);
+        assert_eq!(lhs, rhs, "S symmetric-Laurent identity at mu={mu}");
+    }
+}
+
+#[test]
+fn odd_nv_rectangular_equals_padded_square() {
+    // Differential: the committed sqrt(N) polynomials g and h from the
+    // rectangular split equal those from the Nova-style zero-padded *square*
+    // layout on the ORIGINAL N coefficients. (The final proof/transcript differ
+    // because the statement layout differs; the underlying f/g/h relation does
+    // not.)
+    let mut rng = test_rng();
+    for mu in [3usize, 5, 7] {
+        let (t, b, b_row, n) = mercury_dims(mu).unwrap();
+        assert_eq!(b_row, b / 2);
+        assert_eq!(b * b, 2 * n, "square layout has b^2 = 2N for odd mu");
+        let coeffs: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+        let alpha = Fr::rand(&mut rng);
+
+        // rectangular b x (b/2)
+        let (g_rect, _q_rect) = divide_by_binomial(&coeffs, b, b_row, alpha);
+        // padded square b x b: append N zeros (new highest variable = 0-half).
+        let mut padded = coeffs.clone();
+        padded.resize(2 * n, Fr::zero());
+        let (g_sq, _q_sq) = divide_by_binomial(&padded, b, b, alpha);
+        assert_eq!(g_rect, g_sq, "g rectangular != g padded-square at mu={mu}");
+
+        // h from a random column point.
+        let u1: Vec<Fr> = (0..t).map(|_| Fr::rand(&mut rng)).collect();
+        let eq_col = build_eq_vec::<Fr>(&u1, b);
+        let h_rect = compute_h(&coeffs, &eq_col, b_row, b);
+        let h_sq = compute_h(&padded, &eq_col, b, b);
+        assert_eq!(h_rect, h_sq, "h rectangular != h padded-square at mu={mu}");
+    }
 }

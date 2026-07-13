@@ -93,20 +93,30 @@ impl<E: Pairing> StructuredReferenceString<E> for MercuryUniversalParams<E> {
         self.verifier_param.clone()
     }
 
-    /// `supported_size` is the maximum polynomial degree (`N-1`).
+    /// `supported_size` is the maximum polynomial degree, which for a
+    /// *standard* Mercury key must be `N - 1 = 2^mu - 1` for some `mu >=
+    /// 1`. We therefore require `supported_size + 1` to be a power of two
+    /// `>= 2`, so that a non-Mercury (non-power-of-two) key can never be
+    /// formed by accident.
     fn trim(
         &self,
         supported_size: usize,
     ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+        let end = supported_size
+            .checked_add(1)
+            .ok_or_else(|| PCSError::InvalidParameters("degree+1 overflow".to_string()))?;
+        if end < 2 || !end.is_power_of_two() {
+            return Err(PCSError::InvalidParameters(format!(
+                "Mercury key degree must be 2^mu - 1 (mu >= 1); got supported_size {} (N = {})",
+                supported_size, end
+            )));
+        }
         if supported_size > self.prover_param.max_degree {
             return Err(PCSError::InvalidParameters(format!(
                 "requested degree {} exceeds SRS max {}",
                 supported_size, self.prover_param.max_degree
             )));
         }
-        let end = supported_size
-            .checked_add(1)
-            .ok_or_else(|| PCSError::InvalidParameters("degree+1 overflow".to_string()))?;
         if end > self.prover_param.g1_powers.len() {
             return Err(PCSError::InvalidParameters(
                 "trim range exceeds available G1 powers".to_string(),
@@ -290,5 +300,28 @@ mod tests {
         // trim beyond the built degree returns Err (does not panic)
         let srs = MercuryUniversalParams::<E>::gen_srs_for_testing(&mut rng, 4).unwrap();
         assert!(srs.trim(1usize << 4).is_err());
+    }
+
+    #[test]
+    fn test_mercury_srs_trim_rejects_non_mercury_degree() {
+        // A standard Mercury key must have N = 2^mu G1 powers, i.e.
+        // supported_size = 2^mu - 1. Any other degree must be rejected so a
+        // non-Mercury (non-power-of-two) key cannot be formed.
+        let mut rng = test_rng();
+        let srs = MercuryUniversalParams::<E>::gen_srs_for_testing(&mut rng, 6).unwrap();
+        // Rejected: 0 (N=1), 2 (N=3), 6 (N=7), 4 (N=5), 8 (N=9) — none power of 2.
+        for bad in [0usize, 2, 4, 5, 6, 8, 9, 10, 12] {
+            assert!(
+                srs.trim(bad).is_err(),
+                "trim({bad}) must be rejected (N={} not power of two >= 2)",
+                bad + 1
+            );
+        }
+        // Accepted: 1 (N=2), 3 (N=4), 7 (N=8), 15 (N=16), 31 (N=32), 63 (N=64).
+        for good in [1usize, 3, 7, 15, 31, 63] {
+            let (ck, vk) = srs.trim(good).expect("valid Mercury degree");
+            assert_eq!(ck.g1_powers.len(), good + 1);
+            assert_eq!(vk.max_degree, good);
+        }
     }
 }

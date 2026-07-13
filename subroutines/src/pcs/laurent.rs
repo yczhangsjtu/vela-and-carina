@@ -37,6 +37,23 @@ pub(crate) fn laurent_offset(m: usize) -> usize {
 /// the coefficient of `X^d`, `d in -(N-1)..=(N-1)`.
 pub(crate) fn mul_by_reciprocal_tensor<F: Field>(coeffs: &[F], m: usize, r: &[F]) -> Vec<F> {
     let n = 1usize << m;
+    // Length invariants required by the algorithm. Callers (ReciPCS, Mercury)
+    // always pass exactly-sized buffers; these assertions document and guard the
+    // contract so a mis-sized internal call fails loudly in debug/test builds
+    // rather than silently reading out of range or producing a wrong result.
+    debug_assert!(
+        coeffs.len() >= n,
+        "mul_by_reciprocal_tensor: coeffs.len() {} < N = 2^{} = {}",
+        coeffs.len(),
+        m,
+        n
+    );
+    debug_assert!(
+        r.len() >= m,
+        "mul_by_reciprocal_tensor: r.len() {} < m = {}",
+        r.len(),
+        m
+    );
     let offset = n - 1;
     let len = 2 * n - 1;
     let mut buf = vec![F::zero(); len];

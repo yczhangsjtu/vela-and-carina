@@ -103,11 +103,25 @@ fn bench_all() -> Result<(), PCSError> {
     let nv_list = parse_nv_list()?;
     let backends = parse_backends()?;
     println!(
-        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
-        "backend", "nv", "srs_gen", "trim", "commit", "prover(open)", "verify"
+        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>18}  {:>14}  {:>14}",
+        "backend",
+        "nv",
+        "srs_gen",
+        "trim",
+        "commit",
+        "prover_open_trait",
+        "verify_mean",
+        "verify_median"
     );
-    println!("# verify is the mean of {VERIFY_REPETITIONS} repetitions; all other phases run once");
-    println!("{}", "-".repeat(92));
+    println!(
+        "# srs_gen/trim/commit/prover_open_trait are SINGLE wall-clock measurements (each heavy \
+         phase runs exactly once, self-checked); use them only as coarse guides."
+    );
+    println!(
+        "# verify is repeated {VERIFY_REPETITIONS}x; mean and median are reported. For \
+         publication-grade verifier numbers use the Criterion bench (pcs-single-verify-benches)."
+    );
+    println!("{}", "-".repeat(104));
 
     for &nv in &nv_list {
         for backend in &backends {
@@ -131,6 +145,17 @@ fn bench_all() -> Result<(), PCSError> {
     Ok(())
 }
 
+/// Single-open measurement for one backend / `nv`.
+///
+/// Measurement discipline (fixes the earlier double-execution bug):
+///   - `gen_srs_for_testing`, `trim`, `commit`, and the trait `open` each run
+///     **exactly once**; the SRS / keys / commitment / proof they return are
+///     reused (never regenerated just to time them). This is asserted at
+///     runtime via the `phase_calls` counters below, so every benchmark run
+///     self-checks the invariant.
+///   - Only `verify` repeats (`VERIFY_REPETITIONS`), and the very first
+///     repetition doubles as the correctness assertion (no extra untimed
+///     verify). Both mean and median are reported.
 fn bench_backend<PCS>(
     rng: &mut impl ark_std::rand::Rng,
     name: &str,
@@ -144,57 +169,61 @@ where
         Evaluation = Fr,
     >,
 {
-    let srs_gen_ns = {
-        let start = Instant::now();
-        let _ = PCS::gen_srs_for_testing(rng, nv)?;
-        start.elapsed().as_nanos()
-    };
+    // (srs_gen, trim, commit, open) call counters — each must end at 1.
+    let mut phase_calls = [0usize; 4];
 
+    let start = Instant::now();
     let srs = PCS::gen_srs_for_testing(rng, nv)?;
+    let srs_gen_ns = start.elapsed().as_nanos();
+    phase_calls[0] += 1;
 
-    let trim_ns = {
-        let start = Instant::now();
-        let _ = PCS::trim(&srs, None, Some(nv))?;
-        start.elapsed().as_nanos()
-    };
-
+    let start = Instant::now();
     let (ck, vk) = PCS::trim(&srs, None, Some(nv))?;
+    let trim_ns = start.elapsed().as_nanos();
+    phase_calls[1] += 1;
+
     let poly = Arc::new(DenseMultilinearExtension::rand(nv, rng));
     let point: Vec<Fr> = (0..nv).map(|_| Fr::rand(rng)).collect();
+
+    let start = Instant::now();
     let com = PCS::commit(&ck, &poly)?;
+    let commit_ns = start.elapsed().as_nanos();
+    phase_calls[2] += 1;
 
-    let commit_ns = {
-        let start = Instant::now();
-        let _ = PCS::commit(&ck, &poly)?;
-        start.elapsed().as_nanos()
-    };
-
-    let prover_ns = {
-        let start = Instant::now();
-        let _ = PCS::open(&ck, &poly, &point)?;
-        start.elapsed().as_nanos()
-    };
-
+    let start = Instant::now();
     let (proof, value) = PCS::open(&ck, &poly, &point)?;
-    assert!(PCS::verify(&vk, &com, &point, &value, &proof)?);
+    let prover_ns = start.elapsed().as_nanos();
+    phase_calls[3] += 1;
 
-    let verify_ns = {
+    // Only verify repeats; the first repetition is the correctness check.
+    let mut samples = Vec::with_capacity(VERIFY_REPETITIONS);
+    for _ in 0..VERIFY_REPETITIONS {
         let start = Instant::now();
-        for _ in 0..VERIFY_REPETITIONS {
-            assert!(PCS::verify(&vk, &com, &point, &value, &proof)?);
-        }
-        start.elapsed().as_nanos() / (VERIFY_REPETITIONS as u128)
-    };
+        let ok = PCS::verify(&vk, &com, &point, &value, &proof)?;
+        samples.push(start.elapsed().as_nanos());
+        assert!(ok, "{name}: verify returned false at nv={nv}");
+    }
+
+    assert_eq!(
+        phase_calls, [1usize; 4],
+        "{name}: each heavy phase (srs_gen, trim, commit, open) must run exactly once"
+    );
+
+    let sum: u128 = samples.iter().sum();
+    let mean = sum / (VERIFY_REPETITIONS as u128);
+    samples.sort_unstable();
+    let median = samples[VERIFY_REPETITIONS / 2];
 
     println!(
-        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>14}  {:>14}",
+        "{:<16} {:>4}  {:>12}  {:>12}  {:>14}  {:>18}  {:>14}  {:>14}",
         name,
         nv,
         format_ns(srs_gen_ns),
         format_ns(trim_ns),
         format_ns(commit_ns),
         format_ns(prover_ns),
-        format_ns(verify_ns),
+        format_ns(mean),
+        format_ns(median),
     );
 
     Ok(())
