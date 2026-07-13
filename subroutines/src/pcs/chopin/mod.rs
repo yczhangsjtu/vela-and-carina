@@ -14,8 +14,7 @@ use crate::pcs::{
     },
     laurent::{laurent_offset, mul_by_reciprocal_tensor},
     multilinear_kzg::batching::{
-        batch_verify_internal, multi_open_internal, multi_open_internal_with_commitments,
-        BatchProof,
+        batch_verify_internal, multi_open_internal, reduce_multi_open, BatchProof,
     },
     prelude::{Commitment, PCSError},
     profile::ScopedTimer,
@@ -109,10 +108,34 @@ pub struct ChopinMsmLengths {
 }
 
 impl ChopinMsmLengths {
-    pub fn for_num_vars(mu: usize) -> Self {
+    /// Compute exact MSM lengths for a given number of variables.
+    ///
+    /// Returns `Err` if `mu < 2`, `mu` is too large for the platform word
+    /// size, or any dimension (`M_L`, `M_R`, `q1_len`) overflows `usize`.
+    pub fn for_num_vars(mu: usize) -> Result<Self, PCSError> {
+        if mu < 2 {
+            return Err(PCSError::InvalidParameters(format!(
+                "ChopinMsmLengths requires mu >= 2, got {mu}"
+            )));
+        }
+        if mu >= usize::BITS as usize {
+            return Err(PCSError::InvalidParameters(format!(
+                "mu {mu} too large for platform word size"
+            )));
+        }
         let (m_left, m_right) = split_exponents(mu);
-        let ml = 1usize << m_left;
-        let mr = 1usize << m_right;
+        let ml = 1usize.checked_shl(m_left as u32).ok_or_else(|| {
+            PCSError::InvalidParameters(format!("M_L overflow for m_left={m_left}"))
+        })?;
+        let mr = 1usize.checked_shl(m_right as u32).ok_or_else(|| {
+            PCSError::InvalidParameters(format!("M_R overflow for m_right={m_right}"))
+        })?;
+        let _ = ml
+            .checked_mul(mr)
+            .ok_or_else(|| PCSError::InvalidParameters("N = M_L*M_R overflow".to_string()))?;
+        let _ = (ml - 1)
+            .checked_mul(mr)
+            .ok_or_else(|| PCSError::InvalidParameters("q1_len overflow".to_string()))?;
 
         let q1_len = (ml - 1) * mr;
         let q2_len = mr.saturating_sub(1);
@@ -121,14 +144,12 @@ impl ChopinMsmLengths {
         let cs_len = ml.saturating_sub(1);
 
         let (w_len, wp_len) = if mu % 2 == 0 {
-            // even nv: M_L = M_R = M. W = M-2, W' = M-1
             (ml.saturating_sub(2), ml.saturating_sub(1))
         } else {
-            // odd nv: M_L = 2·M_R. W = M_L-3, W' = M_L-1
             (ml.saturating_sub(3), ml.saturating_sub(1))
         };
 
-        ChopinMsmLengths {
+        Ok(ChopinMsmLengths {
             q1_len,
             q2_len,
             c0_len,
@@ -136,7 +157,7 @@ impl ChopinMsmLengths {
             cs_len,
             w_len,
             wp_len,
-        }
+        })
     }
 }
 
@@ -322,24 +343,28 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ChopinPCS<E> {
             )));
         }
 
-        use crate::pcs::multilinear_kzg::batching::reduce_multi_open;
-        let reduction = reduce_multi_open::<E, Self>(pp, polynomials, points, evals, transcript)?;
+        let reduction = reduce_multi_open::<E, Self>(polynomials, points, evals, transcript)?;
 
         // C_g' = Σ λ_i C_i — same formula the verifier uses
-        let mut g1_bases = Vec::with_capacity(commitments.len());
-        for c in commitments.iter() {
-            g1_bases.push(c.0);
-        }
+        let g1_bases: Vec<_> = commitments.iter().map(|c| c.0).collect();
+        let _t_combine = ScopedTimer::new(
+            BACKEND,
+            pp.num_vars,
+            pp.n(),
+            "chopin_batch_combine_commitments",
+            commitments.len(),
+            "k-base-MSM",
+        );
         let g_prime_commit =
             Commitment(E::G1::msm_unchecked(&g1_bases, &reduction.lambda_i).into_affine());
-        let _g_prime_commit = g_prime_commit; // consumed below
+        drop(_t_combine);
 
         // Use commitment-aware single open: no N-MSM recommit.
         let (g_prime_proof, _g_prime_eval) = ChopinPCS::<E>::open_with_commitment(
             pp,
             &reduction.g_prime,
             &reduction.a2,
-            &_g_prime_commit,
+            &g_prime_commit,
         )?;
 
         Ok(BatchProof {

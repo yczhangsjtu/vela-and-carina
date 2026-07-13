@@ -47,8 +47,7 @@
 
 use crate::pcs::prelude::PCSError;
 use ark_ff::Field;
-#[allow(unused_imports)]
-use ark_std::{string::ToString, vec, vec::Vec, One, Zero};
+use ark_std::{string::ToString, vec, vec::Vec};
 
 // ════════════════════════════════════════════════════════════════════
 // Polynomial primitives (shared, FFT-free, generic over any field)
@@ -406,7 +405,7 @@ pub(crate) fn poly_mul<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    use ark_std::{test_rng, UniformRand};
+    use ark_std::{test_rng, One, UniformRand, Zero};
 
     fn poly_trim(v: &[Fr]) -> Vec<Fr> {
         let mut e = v.len();

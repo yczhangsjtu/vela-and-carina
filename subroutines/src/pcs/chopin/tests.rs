@@ -439,7 +439,7 @@ fn chopin_msm_lengths_match_bdfg_quotients() -> Result<(), PCSError> {
         let second = bdfg_second_round(&claims, &first, rho, z)?;
         let actual_wp_len = second.quot_l.len();
 
-        let model = ChopinMsmLengths::for_num_vars(nv);
+        let model = ChopinMsmLengths::for_num_vars(nv)?;
         assert_eq!(
             actual_w_len, model.w_len,
             "W length mismatch at nv={nv}: actual={actual_w_len} model={}",
@@ -452,6 +452,22 @@ fn chopin_msm_lengths_match_bdfg_quotients() -> Result<(), PCSError> {
         );
     }
     Ok(())
+}
+
+#[test]
+fn chopin_msm_lengths_rejects_invalid_mu() {
+    assert!(ChopinMsmLengths::for_num_vars(0).is_err());
+    assert!(ChopinMsmLengths::for_num_vars(1).is_err());
+    assert!(ChopinMsmLengths::for_num_vars(usize::BITS as usize).is_err());
+}
+
+#[test]
+fn chopin_msm_lengths_no_panic() {
+    use ark_std::panic;
+    for mu in [0usize, 1, usize::MAX, usize::BITS as usize] {
+        let res = panic::catch_unwind(|| ChopinMsmLengths::for_num_vars(mu));
+        assert!(res.is_ok(), "panicked for mu={mu}");
+    }
 }
 
 #[test]
@@ -1091,5 +1107,253 @@ fn batch_malformed_inputs_error() -> Result<(), PCSError> {
     let mut points_bad = points.clone();
     points_bad[0] = rand_point(nv + 1, &mut rng);
     assert!(ChopinPCS::<E>::multi_open(&ck, &polys, &points_bad, &evals, &mut tr).is_err());
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Commitment-aware batch tests (multi_open_with_commitments)
+// ════════════════════════════════════════════════════════════════════
+
+fn batch_with_commitments_open_verify(
+    ck: &ChopinProverParam<E>,
+    vk: &ChopinVerifierParam<E>,
+    polys: &[Arc<DenseMultilinearExtension<Fr>>],
+    points: &[Vec<Fr>],
+) -> Result<bool, PCSError> {
+    let evals: Vec<Fr> = polys
+        .iter()
+        .zip(points.iter())
+        .map(|(f, p)| f.evaluate(p).unwrap())
+        .collect();
+    let commitments: Vec<_> = polys
+        .iter()
+        .map(|poly| ChopinPCS::<E>::commit(ck, poly).unwrap())
+        .collect();
+    let mut tr = IOPTranscript::<Fr>::new(b"chopin-cbatch-test");
+    tr.append_field_element(b"init", &Fr::zero())?;
+    let batch_proof = ChopinPCS::<E>::multi_open_with_commitments(
+        ck,
+        polys,
+        &commitments,
+        points,
+        &evals,
+        &mut tr,
+    )?;
+    let mut tr2 = IOPTranscript::<Fr>::new(b"chopin-cbatch-test");
+    tr2.append_field_element(b"init", &Fr::zero())?;
+    ChopinPCS::<E>::batch_verify(vk, &commitments, points, &batch_proof, &mut tr2)
+}
+
+#[test]
+fn batch_with_commitments_k1() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, vk) = setup(nv + 2);
+    let polys = vec![rand_poly(nv, &mut rng)];
+    let points = vec![rand_point(nv, &mut rng)];
+    assert!(batch_with_commitments_open_verify(
+        &ck, &vk, &polys, &points
+    )?);
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_padded_key() -> Result<(), PCSError> {
+    // poly nv=4, key nv=6 — canonical padding must not break commitment-aware path
+    let mut rng = test_rng();
+    let (ck, vk) = setup(6); // key for 6 vars
+    let nv = 4;
+    let polys: Vec<_> = (0..3).map(|_| rand_poly(nv, &mut rng)).collect();
+    let points: Vec<_> = (0..3).map(|_| rand_point(nv, &mut rng)).collect();
+    assert!(batch_with_commitments_open_verify(
+        &ck, &vk, &polys, &points
+    )?);
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_multiple_distinct_points() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, vk) = setup(nv + 3);
+    let polys: Vec<_> = (0..5).map(|_| rand_poly(nv, &mut rng)).collect();
+    let points: Vec<_> = (0..5).map(|_| rand_point(nv, &mut rng)).collect();
+    assert!(batch_with_commitments_open_verify(
+        &ck, &vk, &polys, &points
+    )?);
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_multiple_same_point() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, vk) = setup(nv + 3);
+    let polys: Vec<_> = (0..4).map(|_| rand_poly(nv, &mut rng)).collect();
+    let pt = rand_point(nv, &mut rng);
+    let points: Vec<_> = (0..4).map(|_| pt.clone()).collect();
+    assert!(batch_with_commitments_open_verify(
+        &ck, &vk, &polys, &points
+    )?);
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_non_power_of_two_k() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, vk) = setup(nv + 3);
+    for k in [3usize, 5, 6, 7] {
+        let polys: Vec<_> = (0..k).map(|_| rand_poly(nv, &mut rng)).collect();
+        let points: Vec<_> = (0..k).map(|_| rand_point(nv, &mut rng)).collect();
+        assert!(
+            batch_with_commitments_open_verify(&ck, &vk, &polys, &points)?,
+            "k={k}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_rejects_malformed_commitment_lengths() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, _vk) = setup(nv + 2);
+    let polys: Vec<_> = (0..3).map(|_| rand_poly(nv, &mut rng)).collect();
+    let points: Vec<_> = (0..3).map(|_| rand_point(nv, &mut rng)).collect();
+    let evals: Vec<Fr> = polys
+        .iter()
+        .zip(points.iter())
+        .map(|(f, p)| f.evaluate(p).unwrap())
+        .collect();
+    let commitments: Vec<_> = polys
+        .iter()
+        .map(|poly| ChopinPCS::<E>::commit(&ck, poly).unwrap())
+        .collect();
+    let mut tr = IOPTranscript::<Fr>::new(b"m");
+    tr.append_field_element(b"init", &Fr::zero())?;
+    // too few
+    assert!(ChopinPCS::<E>::multi_open_with_commitments(
+        &ck,
+        &polys,
+        &commitments[..2],
+        &points,
+        &evals,
+        &mut tr
+    )
+    .is_err());
+    // too many
+    let extra = ChopinPCS::<E>::commit(&ck, &rand_poly(nv, &mut rng))?;
+    let mut cm2 = commitments.clone();
+    cm2.push(extra);
+    assert!(ChopinPCS::<E>::multi_open_with_commitments(
+        &ck, &polys, &cm2, &points, &evals, &mut tr
+    )
+    .is_err());
+    // does not panic
+    use ark_std::panic;
+    let res = panic::catch_unwind(|| {
+        let _ = ChopinPCS::<E>::multi_open_with_commitments(
+            &ck,
+            &polys,
+            &commitments[..2],
+            &points,
+            &evals,
+            &mut IOPTranscript::<Fr>::new(b"m"),
+        );
+    });
+    assert!(res.is_ok());
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_rejects_wrong_commitment() -> Result<(), PCSError> {
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, vk) = setup(nv + 2);
+    let polys: Vec<_> = (0..3).map(|_| rand_poly(nv, &mut rng)).collect();
+    let points: Vec<_> = (0..3).map(|_| rand_point(nv, &mut rng)).collect();
+    let evals: Vec<Fr> = polys
+        .iter()
+        .zip(points.iter())
+        .map(|(f, p)| f.evaluate(p).unwrap())
+        .collect();
+    let commitments: Vec<_> = polys
+        .iter()
+        .map(|poly| ChopinPCS::<E>::commit(&ck, poly).unwrap())
+        .collect();
+    // prover receives a wrong commitment
+    let mut bad_cm = commitments.clone();
+    bad_cm[0] = ChopinPCS::<E>::commit(&ck, &rand_poly(nv, &mut rng))?;
+    let mut tr = IOPTranscript::<Fr>::new(b"m");
+    tr.append_field_element(b"init", &Fr::zero())?;
+    let batch_proof = ChopinPCS::<E>::multi_open_with_commitments(
+        &ck, &polys, &bad_cm, &points, &evals, &mut tr,
+    )?;
+    // verifier uses correct commitments — must reject
+    let mut tr2 = IOPTranscript::<Fr>::new(b"m");
+    tr2.append_field_element(b"init", &Fr::zero())?;
+    let ok = ChopinPCS::<E>::batch_verify(&vk, &commitments, &points, &batch_proof, &mut tr2)?;
+    assert!(!ok, "wrong commitment must be rejected");
+    Ok(())
+}
+
+#[test]
+fn batch_with_commitments_g_prime_commit_matches_direct() -> Result<(), PCSError> {
+    use crate::pcs::multilinear_kzg::batching::reduce_multi_open;
+    let mut rng = test_rng();
+    let nv = 4;
+    let (ck, _vk) = setup(nv + 2);
+
+    // distinct-point case
+    {
+        let polys: Vec<_> = (0..4).map(|_| rand_poly(nv, &mut rng)).collect();
+        let points: Vec<_> = (0..4).map(|_| rand_point(nv, &mut rng)).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(f, p)| f.evaluate(p).unwrap())
+            .collect();
+        let commitments: Vec<_> = polys
+            .iter()
+            .map(|poly| ChopinPCS::<E>::commit(&ck, poly).unwrap())
+            .collect();
+        let mut tr = IOPTranscript::<Fr>::new(b"m");
+        tr.append_field_element(b"init", &Fr::zero())?;
+        let reduction = reduce_multi_open::<E, ChopinPCS<E>>(&polys, &points, &evals, &mut tr)?;
+        // C_linear = Σ λ_i C_i
+        let bases: Vec<_> = commitments.iter().map(|c| c.0).collect();
+        let c_linear = Commitment(
+            <Bls12_381 as Pairing>::G1::msm_unchecked(&bases, &reduction.lambda_i).into_affine(),
+        );
+        // C_direct = commit(g_prime)
+        let c_direct = ChopinPCS::<E>::commit(&ck, &reduction.g_prime)?;
+        assert_eq!(c_linear, c_direct, "linear vs direct mismatch (distinct)");
+    }
+
+    // repeated-point case
+    {
+        let polys: Vec<_> = (0..4).map(|_| rand_poly(nv, &mut rng)).collect();
+        let pt = rand_point(nv, &mut rng);
+        let points: Vec<_> = (0..4).map(|_| pt.clone()).collect();
+        let evals: Vec<Fr> = polys
+            .iter()
+            .zip(points.iter())
+            .map(|(f, p)| f.evaluate(p).unwrap())
+            .collect();
+        let commitments: Vec<_> = polys
+            .iter()
+            .map(|poly| ChopinPCS::<E>::commit(&ck, poly).unwrap())
+            .collect();
+        let mut tr = IOPTranscript::<Fr>::new(b"m");
+        tr.append_field_element(b"init", &Fr::zero())?;
+        let reduction = reduce_multi_open::<E, ChopinPCS<E>>(&polys, &points, &evals, &mut tr)?;
+        let bases: Vec<_> = commitments.iter().map(|c| c.0).collect();
+        let c_linear = Commitment(
+            <Bls12_381 as Pairing>::G1::msm_unchecked(&bases, &reduction.lambda_i).into_affine(),
+        );
+        let c_direct = ChopinPCS::<E>::commit(&ck, &reduction.g_prime)?;
+        assert_eq!(c_linear, c_direct, "linear vs direct mismatch (repeated)");
+    }
     Ok(())
 }

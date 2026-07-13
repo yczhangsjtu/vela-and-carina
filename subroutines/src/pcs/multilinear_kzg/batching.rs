@@ -57,7 +57,6 @@ where
 /// This is the common core used by both the generic (recommit) path and the
 /// commitment-aware path.  Transcript ordering is preserved.
 pub(crate) fn reduce_multi_open<E, PCS>(
-    prover_param: &PCS::ProverParam,
     polynomials: &[PCS::Polynomial],
     points: &[PCS::Point],
     evals: &[PCS::Evaluation],
@@ -198,67 +197,8 @@ where
     })
 }
 
-/// Commitment-aware multi-open: uses the g' commitment reconstructed from the
-/// original commitments via `C_g' = Σ λ_i C_i`, avoiding a fresh N-MSM.
-/// The transcript, sumcheck, and λ_i are identical to the generic path.
-pub(crate) fn multi_open_internal_with_commitments<E, PCS>(
-    prover_param: &PCS::ProverParam,
-    polynomials: &[PCS::Polynomial],
-    commitments: &[PCS::Commitment],
-    points: &[PCS::Point],
-    evals: &[PCS::Evaluation],
-    transcript: &mut IOPTranscript<E::ScalarField>,
-) -> Result<BatchProof<E, PCS>, PCSError>
-where
-    E: Pairing,
-    PCS: PolynomialCommitmentScheme<
-        E,
-        Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
-        Point = Vec<E::ScalarField>,
-        Evaluation = E::ScalarField,
-        Commitment = Commitment<E>,
-    >,
-{
-    if commitments.len() != polynomials.len() {
-        return Err(PCSError::InvalidParameters(format!(
-            "multi_open_with_commitments: commitments.len()={} != polynomials.len()={}",
-            commitments.len(),
-            polynomials.len()
-        )));
-    }
-
-    let reduction =
-        reduce_multi_open::<E, PCS>(prover_param, polynomials, points, evals, transcript)?;
-
-    // C_g' = Σ λ_i C_i
-    let mut scalars = reduction.lambda_i.clone();
-    let bases: Vec<_> = commitments.iter().map(|c| c.0).collect();
-    let g_prime_commit: Commitment<E> =
-        Commitment(E::G1::msm_unchecked(&bases, &scalars).into_affine());
-
-    // Call open_with_commitment if available; otherwise fall back to open +
-    // verify-commit We use PCS::open for the final opening since not all
-    // backends have commitment-aware single open. For CHOPIN, the override uses
-    // open_with_commitment, avoiding the recommit.
-    let (g_prime_proof, _g_prime_eval) =
-        PCS::open(prover_param, &reduction.g_prime, &reduction.a2)?;
-
-    drop(scalars);
-    let _ = g_prime_commit; // unused in batch proof struct; kept for correctness check
-
-    Ok(BatchProof {
-        sum_check_proof: reduction.sum_check_proof,
-        f_i_eval_at_point_i: evals.to_vec(),
-        g_prime_proof,
-    })
-}
-
-/// Generic multi-open (original path).  The shared sumcheck reduction is
-/// delegated to [`reduce_multi_open`]; the final opening uses `PCS::open`
-/// (which may recommit g' depending on the backend).
-/// Generic multi-open (original path).  The shared sumcheck reduction is
-/// delegated to [`reduce_multi_open`]; the final opening uses `PCS::open`
-/// (which may recommit g' depending on the backend).
+/// Generic multi-open (original path).  Delegates to [`reduce_multi_open`];
+/// the final opening uses `PCS::open` (which may recommit g').
 pub(crate) fn multi_open_internal<E, PCS>(
     prover_param: &PCS::ProverParam,
     polynomials: &[PCS::Polynomial],
@@ -275,9 +215,7 @@ where
         Evaluation = E::ScalarField,
     >,
 {
-    let reduction =
-        reduce_multi_open::<E, PCS>(prover_param, polynomials, points, evals, transcript)?;
-
+    let reduction = reduce_multi_open::<E, PCS>(polynomials, points, evals, transcript)?;
     let (g_prime_proof, _g_prime_eval) =
         PCS::open(prover_param, &reduction.g_prime, &reduction.a2)?;
 

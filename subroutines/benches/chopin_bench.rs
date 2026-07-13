@@ -15,11 +15,12 @@
 //     scalar total 1N + O(sqrt N).
 //
 // Env vars:
-//   CHOPIN_BENCH_NV_RANGE        default 8,10,12,14,16,18,20
-//   CHOPIN_BENCH_BACKEND         mkzg|gemini|recipcs|samaritan|zeromorph|nrg|
+//   CHOPIN_BENCH_NV_RANGE       comma separated positive ints; default
+//                                8,10,12,14,16,18,20.
+//   CHOPIN_BENCH_BACKEND        mkzg|gemini|recipcs|samaritan|zeromorph|nrg|
 //                                mercury|chopin|all (+ mulcs legacy, nrg
-// aliases)   CHOPIN_BENCH_MODE            comparison|detail (default
-// comparison)   CHOPIN_VERIFY_REPETITIONS    default 100.
+// aliases).   CHOPIN_BENCH_MODE           comparison|detail (default
+// comparison).   CHOPIN_VERIFY_REPETITIONS   default 100.
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_ff::UniformRand;
@@ -347,7 +348,7 @@ fn detail_row(nv: usize, reps: usize) -> Result<(), PCSError> {
     }
     let (mean, median) = mean_median(samples);
 
-    let msm = ChopinMsmLengths::for_num_vars(nv);
+    let msm = ChopinMsmLengths::for_num_vars(nv)?;
     let q1_len = msm.q1_len;
     let q2_len = msm.q2_len;
     let c0_len = msm.c0_len;
