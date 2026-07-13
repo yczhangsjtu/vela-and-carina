@@ -482,21 +482,24 @@ fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
 fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> {
     let mut rng = test_rng();
     for nv in [2usize, 4, 8] {
-        let (ck, _vk) = setup(nv);
+        let (ck, vk) = setup(nv);
         let poly = rand_poly(nv, &mut rng);
         let poly2 = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
         let value = poly.evaluate(&point).unwrap();
         let wrong_com = ReciPCS::<E>::commit(&ck, &poly2)?;
         let r = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &wrong_com);
-        // The value inconsistency is detected inside recipcs_open; may error or
-        // produce a proof that fails verification.
         if let Ok((proof, val)) = r {
-            let (_, vk) = setup(nv);
             let com = ReciPCS::<E>::commit(&ck, &poly)?;
+            // Verify with the SAME vk from the initial setup
             assert!(
                 !ReciPCS::<E>::verify(&vk, &com, &point, &val, &proof)?,
                 "wrong commitment should not produce verifiable proof"
+            );
+            // Also assert it doesn't verify under the wrong commitment
+            assert!(
+                !ReciPCS::<E>::verify(&vk, &wrong_com, &point, &val, &proof)?,
+                "proof under wrong commitment should not verify"
             );
         }
     }

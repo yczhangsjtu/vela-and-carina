@@ -2268,6 +2268,10 @@ mod tests {
                     !GeminiPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?,
                     "wrong commitment should not produce verifiable proof"
                 );
+                assert!(
+                    !GeminiPCS::<E>::verify(&vk, &wrong_com, &pt, &val, &proof)?,
+                    "proof under the supplied wrong commitment should not verify"
+                );
             }
         }
         Ok(())

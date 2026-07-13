@@ -2481,6 +2481,10 @@ mod tests {
                     !SamaritanPCS::<E>::verify(&vk, &com, &pt, &val, &proof)?,
                     "wrong commitment should not produce verifiable proof"
                 );
+                assert!(
+                    !SamaritanPCS::<E>::verify(&vk, &wrong_com, &pt, &val, &proof)?,
+                    "proof under the supplied wrong commitment should not verify"
+                );
             }
         }
         Ok(())
