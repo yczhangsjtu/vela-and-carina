@@ -163,12 +163,17 @@ Consequences of odd `mu`:
   = sqrt(2N)`, i.e. a `sqrt(2)` factor larger than the even case; this is a pure
   `O(sqrt N)` overhead, reported separately.
 
-This differs from Nova, which instead prepends a zero variable and works over a
-`b x b` matrix with a zero upper half (`b = sqrt(2N)`, `b_row = b/2` used only to
-skip the zero rows in the big MSMs). Both are correct; the rectangular split
-avoids the point-padding bookkeeping and is the "non-padding rectangular split"
-option the task allows. The odd-`nv` tests (`open_verify_even_and_odd`,
-`open_verify_minimum_nv`, HyperPlonk `nv=5`) exercise this path directly.
+This differs from Nova, which pads its evaluation vector and inserts a zero
+coordinate into its point representation before applying its own square split.
+That is a different raw variable layout: this implementation does **not** claim
+that its `g`/`h` coefficient vectors equal Nova's without an explicit variable
+permutation map. Instead, the rectangular construction is justified directly
+below. The local differential test checks the narrower, relevant invariant that
+appending a new *highest* variable fixed to zero turns the `b x (b/2)` rectangle
+into a `b x b` matrix with zero upper rows, without changing this implementation's
+`g`, `h`, or multilinear evaluation. The odd-`nv` tests
+(`open_verify_even_and_odd`, `open_verify_minimum_nv`, HyperPlonk `nv=5`)
+exercise the actual rectangular protocol path directly.
 
 ### 5.1 Equation-level correctness of the rectangular split
 
@@ -242,9 +247,11 @@ factor lives only in the sqrt-scale helpers here).
 `<eq_row,h> = fhat(point)`; `odd_nv_fold_identity` checks
 `f = (X^b-alpha)q+g` at random points; `odd_nv_structured_s_identity` checks the
 `S` symmetric-Laurent identity at `z` and `1/z`; and
-`odd_nv_rectangular_equals_padded_square` is a **differential** test proving the
-rectangular `g` and `h` equal those computed by the Nova-style zero-padded
-*square* layout (append `N` zeros, `b x b`) on the same original coefficients.
+`odd_nv_rectangular_matches_zero_row_extension` is a **local-layout
+differential** test: appending `N` zero coefficients represents one new highest
+variable fixed to zero, produces the same `g` and `h`, and preserves the
+multilinear evaluation. It deliberately does not claim byte-for-byte equality
+with Nova's differently ordered padded point representation.
 The full odd-`nv` open/verify (with real `g,h,S,D` commitments and the BDFG20
 opening) is covered by `open_verify_even_and_odd` and the HyperPlonk `nv=5`
 end-to-end test. This is an algebraic derivation of the Mercury §6 premises

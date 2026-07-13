@@ -773,11 +773,18 @@ fn nondegenerate_challenges(rng: &mut impl Rng) -> (Fr, Fr, Fr, Fr, Fr) {
         if alpha == zeta || alpha == zeta_inv {
             continue;
         }
+        // The BDFG20 batching test needs every polynomial family to contribute
+        // to m(X), so exclude beta = 0 rather than relying on a negligible
+        // random event not occurring.
+        let beta = Fr::rand(rng);
+        if beta.is_zero() {
+            continue;
+        }
         let z = Fr::rand(rng);
         if z == zeta || z == zeta_inv || z == alpha {
             continue;
         }
-        return (alpha, zeta, zeta_inv, Fr::rand(rng), z);
+        return (alpha, zeta, zeta_inv, beta, z);
     }
 }
 
@@ -844,6 +851,42 @@ fn bdfg_coefficient_identities_and_commitments() -> Result<(), PCSError> {
         // Commitments of the reference witnesses.
         let comm_w = ck.commit(&mpolys.quot_m)?;
         let comm_w_prime = ck.commit(&lpolys.quot_l)?;
+
+        // Exercise the transcript wrapper itself, not just the pure helpers.
+        // Preview its Fiat-Shamir challenges, construct the independent
+        // reference witnesses, then replay the same transcript through
+        // bdfg_prove and compare the emitted commitments directly.
+        let mut wrapper_checked = false;
+        for salt in 0u64..64 {
+            let mut tr = IOPTranscript::<Fr>::new(b"mercury-bdfg-wrapper-test");
+            tr.append_field_element(b"init", &Fr::from(salt))?;
+            let mut preview = tr.clone();
+            let fs_beta = preview.get_and_append_challenge(L_BETA)?;
+            let fs_mpolys = bdfg_build_m(&inp, fs_beta)?;
+            let fs_comm_w = ck.commit(&fs_mpolys.quot_m)?;
+            preview.append_serializable_element(L_W, &fs_comm_w)?;
+            let fs_z = preview.get_and_append_challenge(L_ZBDFG)?;
+            if validate_zbdfg(fs_z, zeta, zeta_inv, alpha).is_err() {
+                continue;
+            }
+            let fs_lpolys = bdfg_build_l(&inp, &fs_mpolys, fs_beta, fs_z)?;
+            let fs_comm_w_prime = ck.commit(&fs_lpolys.quot_l)?;
+            let (prover_comm_w, prover_comm_w_prime) = bdfg_prove(&ck, &inp, mu, n, &mut tr)?;
+            assert_eq!(
+                prover_comm_w, fs_comm_w,
+                "bdfg_prove W commitment mismatch at mu={mu}"
+            );
+            assert_eq!(
+                prover_comm_w_prime, fs_comm_w_prime,
+                "bdfg_prove W' commitment mismatch at mu={mu}"
+            );
+            wrapper_checked = true;
+            break;
+        }
+        assert!(
+            wrapper_checked,
+            "unable to derive a non-colliding BDFG20 test challenge"
+        );
 
         // Verifier homomorphic reconstruction, with the same (beta, z).
         let proof = MercuryProof::<E> {
@@ -1114,8 +1157,13 @@ fn odd_nv_structured_s_identity() {
             .map(|(a, c)| *a * *c)
             .sum();
 
-        let z = Fr::rand(&mut rng);
-        let z_inv = z.inverse().unwrap();
+        let z = loop {
+            let z = Fr::rand(&mut rng);
+            if !z.is_zero() {
+                break z;
+            }
+        };
+        let z_inv = z.inverse().expect("nonzero z has an inverse");
         let pu1_z = pu_eval(&u1, z);
         let pu1_zi = pu_eval(&u1, z_inv);
         let pu2_z = pu_eval(&u2, z);
@@ -1130,12 +1178,14 @@ fn odd_nv_structured_s_identity() {
 }
 
 #[test]
-fn odd_nv_rectangular_equals_padded_square() {
-    // Differential: the committed sqrt(N) polynomials g and h from the
-    // rectangular split equal those from the Nova-style zero-padded *square*
-    // layout on the ORIGINAL N coefficients. (The final proof/transcript differ
-    // because the statement layout differs; the underlying f/g/h relation does
-    // not.)
+fn odd_nv_rectangular_matches_zero_row_extension() {
+    // This is a local-layout differential, not a replay of Nova's odd-nv path.
+    // Appending N zero coefficients introduces one new *high* variable fixed at
+    // zero, so the original b x (b/2) rectangle becomes a b x b matrix with
+    // zero upper rows. The low-variable column point is unchanged, hence g and
+    // h must agree coefficient-wise. Nova's code inserts a point coordinate at
+    // a different position and uses a different variable split, so its raw g/h
+    // vectors are not expected to equal these ones without a permutation map.
     let mut rng = test_rng();
     for mu in [3usize, 5, 7] {
         let (t, b, b_row, n) = mercury_dims(mu).unwrap();
@@ -1158,5 +1208,18 @@ fn odd_nv_rectangular_equals_padded_square() {
         let h_rect = compute_h(&coeffs, &eq_col, b_row, b);
         let h_sq = compute_h(&padded, &eq_col, b, b);
         assert_eq!(h_rect, h_sq, "h rectangular != h padded-square at mu={mu}");
+
+        // The zero-row extension represents the original MLE with one new
+        // highest variable fixed to zero.
+        let original = DenseMultilinearExtension::from_evaluations_vec(mu, coeffs);
+        let extended = DenseMultilinearExtension::from_evaluations_vec(mu + 1, padded);
+        let point: Vec<Fr> = (0..mu).map(|_| Fr::rand(&mut rng)).collect();
+        let mut extended_point = point.clone();
+        extended_point.push(Fr::zero());
+        assert_eq!(
+            original.evaluate(&point),
+            extended.evaluate(&extended_point),
+            "zero-row extension changes the MLE value at mu={mu}"
+        );
     }
 }
