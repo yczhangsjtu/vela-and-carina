@@ -1,7 +1,7 @@
 # Vela and Carina
 
-This repository accompanies the paper *Vela and Carina: Pairing-Based
-Multilinear Polynomial Commitments with Complementary Trade-offs*. It contains
+This repository accompanies the paper *Vela and Carina: Fast Pairing-Based
+Multilinear Polynomial Commitments from Reciprocal Polynomials*. It contains
 Rust implementations of two pairing-based multilinear polynomial commitment
 schemes (MLPCSs), together with a HyperPlonk integration and comparable
 research implementations of several published PCS baselines.
