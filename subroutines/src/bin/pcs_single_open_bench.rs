@@ -23,8 +23,8 @@ use ark_std::{sync::Arc, test_rng};
 use std::{env, process, time::Instant};
 use subroutines::pcs::{
     prelude::{
-        ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
-        ReciPCS, SamaritanPCS, ZeromorphPCS,
+        CarinaPCS, ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, PCSError,
+        SamaritanPCS, VelaPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -434,14 +434,14 @@ fn bench_mulcs(
 
 // ── backends using open_with_commitment ──
 
-fn bench_recipcs(
+fn bench_vela(
     name: &str,
     nv: usize,
     n: usize,
     threads: usize,
     master_seed: &[u8; 32],
 ) -> Result<(), PCSError> {
-    type PCS = ReciPCS<E>;
+    type PCS = VelaPCS<E>;
     let poly_seed = input_seed(master_seed, nv, b'p');
     let point_seed = input_seed(master_seed, nv, b'r');
     let (ck, vk) = bench_common_phases!(PCS, name, nv, n, threads, ());
@@ -452,7 +452,7 @@ fn bench_recipcs(
         let t = Instant::now();
         // eval part of protocol-internal computation; include in timing.
         let val = poly.evaluate(&point).unwrap();
-        let (p, e) = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, val, &com)?;
+        let (p, e) = VelaPCS::<E>::open_with_commitment(&ck, &poly, &point, val, &com)?;
         emit(&[
             name.into(),
             nv.to_string(),
@@ -600,14 +600,14 @@ fn bench_zeromorph(
     Ok(())
 }
 
-fn bench_nrg(
+fn bench_carina(
     name: &str,
     nv: usize,
     n: usize,
     threads: usize,
     master_seed: &[u8; 32],
 ) -> Result<(), PCSError> {
-    type PCS = NestedGridKzgPCS<E>;
+    type PCS = CarinaPCS<E>;
     let poly_seed = input_seed(master_seed, nv, b'p');
     let point_seed = input_seed(master_seed, nv, b'r');
     let (ck, vk) = bench_common_phases!(PCS, name, nv, n, threads, ());
@@ -616,7 +616,7 @@ fn bench_nrg(
     let com = bench_commit_phase!(PCS, name, nv, n, threads, ck, poly);
     let (proof, eval) = {
         let t = Instant::now();
-        let (p, e) = NestedGridKzgPCS::<E>::open_with_commitment(&ck, &poly, &point, &com)?;
+        let (p, e) = CarinaPCS::<E>::open_with_commitment(&ck, &poly, &point, &com)?;
         emit(&[
             name.into(),
             nv.to_string(),
@@ -749,8 +749,8 @@ fn try_main() -> Result<(), PCSError> {
             "mulcs" => bench_mulcs("MulcsClaymore", nv, n, threads, &master_seed),
             "samaritan" => bench_samaritan("Samaritan", nv, n, threads, &master_seed),
             "zeromorph" => bench_zeromorph("Zeromorph", nv, n, threads, &master_seed),
-            "recipcs" => bench_recipcs("ReciPCS", nv, n, threads, &master_seed),
-            "nrg" => bench_nrg("NestedGridKZG", nv, n, threads, &master_seed),
+            "vela" => bench_vela("Vela", nv, n, threads, &master_seed),
+            "carina" => bench_carina("Carina", nv, n, threads, &master_seed),
             "mercury" => bench_mercury("Mercury", nv, n, threads, &master_seed),
             "chopin" => bench_chopin("Chopin", nv, n, threads, &master_seed),
             other => Err(PCSError::InvalidParameters(format!(

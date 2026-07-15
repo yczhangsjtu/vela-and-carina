@@ -1,6 +1,6 @@
-//! HyperPlonk + ReciPCS backend correctness tests (case study).
+//! HyperPlonk + Vela backend correctness tests.
 //!
-//! Run with: cargo test -p hyperplonk recipcs_backend -- --nocapture
+//! Run with: cargo test -p hyperplonk vela_backend -- --nocapture
 
 #[cfg(test)]
 mod tests {
@@ -12,7 +12,7 @@ mod tests {
     };
     use subroutines::{
         pcs::{
-            prelude::{MultilinearKzgPCS, ReciPCS},
+            prelude::{MultilinearKzgPCS, VelaPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -22,48 +22,48 @@ mod tests {
     type FrType = Fr;
 
     #[test]
-    fn test_hyperplonk_recipcs_e2e() -> Result<(), HyperPlonkErrors> {
+    fn test_hyperplonk_vela_e2e() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let gates = CustomizedGates::vanilla_plonk_gate();
-        let pcs_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
+        let pcs_srs = VelaPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
 
         for nv in [4usize, 5, 6] {
             let size = 1 << nv;
             let circuit = MockCircuit::<FrType>::new(size, &gates);
             assert!(circuit.is_satisfied(), "circuit not satisfied at nv={nv}");
 
-            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::preprocess(
                 &circuit.index,
                 &pcs_srs,
             )?;
-            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
             )?;
-            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
             )?;
-            assert!(ok, "HyperPlonk+ReciPCS verify failed at nv={nv}");
+            assert!(ok, "HyperPlonk+Vela verify failed at nv={nv}");
         }
         Ok(())
     }
 
     #[test]
-    fn test_hyperplonk_recipcs_rejects_tampered_public_input() -> Result<(), HyperPlonkErrors> {
+    fn test_hyperplonk_vela_rejects_tampered_public_input() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let gates = CustomizedGates::vanilla_plonk_gate();
-        let pcs_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let pcs_srs = VelaPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let nv = 5;
         let size = 1 << nv;
         let circuit = MockCircuit::<FrType>::new(size, &gates);
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::preprocess(
             &circuit.index,
             &pcs_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
@@ -71,7 +71,7 @@ mod tests {
         let mut bad_inputs = circuit.public_inputs.clone();
         if !bad_inputs.is_empty() {
             bad_inputs[0] += Fr::from(1u64);
-            let res = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+            let res = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::verify(
                 &vk,
                 &bad_inputs,
                 &proof,
@@ -85,9 +85,9 @@ mod tests {
     }
 
     // Cross-backend: the same circuit is provable and verifiable under both mKZG
-    // and ReciPCS, giving independent confidence in the ReciPCS integration.
+    // and Vela, giving independent confidence in the Vela integration.
     #[test]
-    fn test_hyperplonk_cross_backend_recipcs_vs_mkzg() -> Result<(), HyperPlonkErrors> {
+    fn test_hyperplonk_cross_backend_vela_vs_mkzg() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let gates = CustomizedGates::vanilla_plonk_gate();
         let nv = 5;
@@ -95,17 +95,17 @@ mod tests {
         let circuit = MockCircuit::<FrType>::new(size, &gates);
         assert!(circuit.is_satisfied());
 
-        let srs_reci = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
-        let (pk_r, vk_r) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+        let srs_vela = VelaPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
+        let (pk_r, vk_r) = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::preprocess(
             &circuit.index,
-            &srs_reci,
+            &srs_vela,
         )?;
-        let proof_r = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
+        let proof_r = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::prove(
             &pk_r,
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
-        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::verify(
             &vk_r,
             &circuit.public_inputs,
             &proof_r

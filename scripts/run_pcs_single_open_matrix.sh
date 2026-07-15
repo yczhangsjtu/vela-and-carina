@@ -5,7 +5,7 @@ set -euo pipefail
 # Each combination (backend × nv) runs in its own process.
 #
 # Env overrides:
-#   PCS_BENCH_BACKENDS    comma-separated list, default: mkzg,mulcs,nrg,mercury,chopin,recipcs,gemini,samaritan,zeromorph
+#   PCS_BENCH_BACKENDS    comma-separated list, default: mkzg,mulcs,carina,mercury,chopin,vela,gemini,samaritan,zeromorph
 #   PCS_BENCH_NV_RANGE    comma-separated list, default: 8,10,12,14,16,18,20
 #   PCS_BENCH_THREADS     rayon thread count, default num_cpus
 #   PCS_BENCH_SEED        u64 seed, default fixed
@@ -26,7 +26,7 @@ BIN="pcs_single_open_bench"
 RELEASE_DIR="$REPO_ROOT/target/release"
 
 # ── config (overridable via env) ──
-DEFAULT_BACKENDS="mkzg,mulcs,nrg,mercury,chopin,recipcs,gemini,samaritan,zeromorph"
+DEFAULT_BACKENDS="mkzg,mulcs,carina,mercury,chopin,vela,gemini,samaritan,zeromorph"
 DEFAULT_NVS="8,10,12,14,16,18,20"
 
 BACKENDS_STR="${PCS_BENCH_BACKENDS:-$DEFAULT_BACKENDS}"
@@ -117,10 +117,10 @@ for nv in "${nvs[@]}"; do
         case "$backend" in
             mkzg) label="mKZG" ;;
             mulcs) label="MulcsClaymore" ;;
-            nrg) label="NestedGridKZG" ;;
+            carina) label="Carina" ;;
             mercury) label="Mercury" ;;
             chopin) label="Chopin" ;;
-            recipcs) label="ReciPCS" ;;
+            vela) label="Vela" ;;
             gemini) label="Gemini" ;;
             samaritan) label="Samaritan" ;;
             zeromorph) label="Zeromorph" ;;

@@ -13,7 +13,7 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                GeminiPCS, MercuryPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS, SamaritanPCS,
+                CarinaPCS, GeminiPCS, MercuryPCS, MultilinearKzgPCS, SamaritanPCS, VelaPCS,
                 ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
@@ -88,9 +88,8 @@ mod tests {
     }
 
     // Cross-backend: the same circuit is provable and verifiable under every
-    // supported PCS backend (mKZG, Gemini, ReciPCS, Zeromorph, Samaritan,
-    // NestedGridKZG, Mercury). ReciPCS is the sole canonical symmetric backend;
-    // MulcsSymmetric (its legacy alias) is intentionally NOT a separate entry.
+    // supported PCS backend (mKZG, Gemini, Vela, Zeromorph, Samaritan,
+    // Carina, Mercury).
     #[test]
     fn test_hyperplonk_cross_backend_all() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
@@ -123,10 +122,10 @@ mod tests {
 
         run_backend!(MultilinearKzgPCS<E>, "mKZG");
         run_backend!(GeminiPCS<E>, "Gemini");
-        run_backend!(ReciPCS<E>, "ReciPCS");
+        run_backend!(VelaPCS<E>, "Vela");
         run_backend!(ZeromorphPCS<E>, "Zeromorph");
         run_backend!(SamaritanPCS<E>, "Samaritan");
-        run_backend!(NestedGridKzgPCS<E>, "NestedGridKZG");
+        run_backend!(CarinaPCS<E>, "Carina");
         run_backend!(MercuryPCS<E>, "Mercury");
         Ok(())
     }

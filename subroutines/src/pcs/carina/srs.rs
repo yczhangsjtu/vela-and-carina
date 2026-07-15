@@ -1,4 +1,4 @@
-//! Structured reference string for the Nested Reciprocal Grid-KZG PCS.
+//! Structured reference string for the Carina PCS.
 //!
 //! For `mu` variables we use a non-padded rectangular split
 //!   m_left  = ceil(mu/2),  M_L = 2^m_left,
@@ -30,7 +30,7 @@ use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, string::ToString, sync::Arc, vec::Vec, One, UniformRand, Zero};
 
-const BACKEND: &str = "NestedGridKZG";
+const BACKEND: &str = "Carina";
 
 /// Chunk size (number of G1 elements) for the FixedBase SRS generation.
 ///
@@ -76,7 +76,7 @@ fn inv_base_index(big_ml: usize, big_mr: usize, p: usize) -> (usize, usize) {
 
 /// Universal parameters: the full bivariate grid key plus the five G2 powers.
 #[derive(Clone, Debug)]
-pub struct NestedGridKzgUniversalParams<E: Pairing> {
+pub struct CarinaUniversalParams<E: Pairing> {
     /// `[tau^i sigma^j]_1` in dominant-QX-first layout for the maximal split.
     /// Shared behind an `Arc` so trimming to the same size does not copy.
     pub g1_powers: Arc<Vec<E::G1Affine>>,
@@ -95,7 +95,7 @@ pub struct NestedGridKzgUniversalParams<E: Pairing> {
 
 /// Prover parameters for a specific `num_vars`.
 #[derive(Clone, Debug)]
-pub struct NestedGridKzgProverParam<E: Pairing> {
+pub struct CarinaProverParam<E: Pairing> {
     /// `[tau^i sigma^j]_1` in dominant-QX-first layout for this split. Shared
     /// with the universal params when trimming to the maximal size.
     pub g1_powers: Arc<Vec<E::G1Affine>>,
@@ -106,7 +106,7 @@ pub struct NestedGridKzgProverParam<E: Pairing> {
 
 /// Verifier parameters: seven small G1 bases and the five G2 powers.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct NestedGridKzgVerifierParam<E: Pairing> {
+pub struct CarinaVerifierParam<E: Pairing> {
     pub g1_one: E::G1Affine,
     pub g1_tau: E::G1Affine,
     pub g1_sigma: E::G1Affine,
@@ -122,7 +122,7 @@ pub struct NestedGridKzgVerifierParam<E: Pairing> {
     pub m_right: usize,
 }
 
-impl<E: Pairing> NestedGridKzgProverParam<E> {
+impl<E: Pairing> CarinaProverParam<E> {
     #[inline]
     pub(crate) fn big_ml(&self) -> usize {
         1usize << self.m_left
@@ -181,7 +181,7 @@ impl<E: Pairing> NestedGridKzgProverParam<E> {
     }
 }
 
-impl<E: Pairing> NestedGridKzgUniversalParams<E> {
+impl<E: Pairing> CarinaUniversalParams<E> {
     #[inline]
     fn big_ml(&self) -> usize {
         1usize << self.m_left
@@ -198,10 +198,10 @@ impl<E: Pairing> NestedGridKzgUniversalParams<E> {
     fn build_params(
         &self,
         num_vars: usize,
-    ) -> Result<(NestedGridKzgProverParam<E>, NestedGridKzgVerifierParam<E>), PCSError> {
+    ) -> Result<(CarinaProverParam<E>, CarinaVerifierParam<E>), PCSError> {
         if num_vars < 4 {
             return Err(PCSError::InvalidParameters(format!(
-                "nested-grid-kzg requires num_vars >= 4, got {}",
+                "carina requires num_vars >= 4, got {}",
                 num_vars
             )));
         }
@@ -240,13 +240,13 @@ impl<E: Pairing> NestedGridKzgUniversalParams<E> {
             Arc::new(powers)
         };
 
-        let pp = NestedGridKzgProverParam {
+        let pp = CarinaProverParam {
             g1_powers: Arc::clone(&g1_powers),
             num_vars,
             m_left,
             m_right,
         };
-        let vp = NestedGridKzgVerifierParam {
+        let vp = CarinaVerifierParam {
             g1_one: g1_powers[grid_base_index(big_ml, big_mr, 0, 0)],
             g1_tau: g1_powers[grid_base_index(big_ml, big_mr, 1, 0)],
             g1_sigma: g1_powers[grid_base_index(big_ml, big_mr, 0, 1)],
@@ -264,9 +264,9 @@ impl<E: Pairing> NestedGridKzgUniversalParams<E> {
     }
 }
 
-impl<E: Pairing> StructuredReferenceString<E> for NestedGridKzgUniversalParams<E> {
-    type ProverParam = NestedGridKzgProverParam<E>;
-    type VerifierParam = NestedGridKzgVerifierParam<E>;
+impl<E: Pairing> StructuredReferenceString<E> for CarinaUniversalParams<E> {
+    type ProverParam = CarinaProverParam<E>;
+    type VerifierParam = CarinaVerifierParam<E>;
 
     fn extract_prover_param(&self, supported_num_vars: usize) -> Self::ProverParam {
         self.build_params(supported_num_vars)
@@ -297,7 +297,7 @@ impl<E: Pairing> StructuredReferenceString<E> for NestedGridKzgUniversalParams<E
     ) -> Result<Self, PCSError> {
         if supported_num_vars < 4 {
             return Err(PCSError::InvalidParameters(format!(
-                "nested-grid-kzg requires num_vars >= 4, got {}",
+                "carina requires num_vars >= 4, got {}",
                 supported_num_vars
             )));
         }
@@ -401,7 +401,7 @@ impl<E: Pairing> StructuredReferenceString<E> for NestedGridKzgUniversalParams<E
         let g2_sigma = (g2 * sigma).into_affine();
         let g2_sigma2 = (g2 * sigma * sigma).into_affine();
 
-        Ok(NestedGridKzgUniversalParams {
+        Ok(CarinaUniversalParams {
             g1_powers: Arc::new(g1_powers),
             g2_one,
             g2_tau,
@@ -448,7 +448,7 @@ mod tests {
     fn test_prefix_region_monomials() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let nv = 8;
-        let srs = NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let srs = CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
         let (pp, _vp) = srs.trim(nv)?;
         let big_ml = pp.big_ml();
         let big_mr = pp.big_mr();
@@ -467,7 +467,7 @@ mod tests {
     fn test_full_commit_matches_reference() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let nv = 6;
-        let srs = NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let srs = CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
         let (pp, _vp) = srs.trim(nv)?;
         let big_ml = pp.big_ml();
         let big_mr = pp.big_mr();
@@ -501,7 +501,7 @@ mod tests {
     fn test_verifier_bases_consistent() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let nv = 7;
-        let srs = NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
+        let srs = CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
         let (pp, vp) = srs.trim(nv)?;
         let big_ml = pp.big_ml();
         let big_mr = pp.big_mr();
@@ -529,7 +529,7 @@ mod tests {
     fn test_smaller_trim_consistent() -> Result<(), PCSError> {
         let mut rng = test_rng();
         let max_nv = 10;
-        let srs = NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, max_nv)?;
+        let srs = CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, max_nv)?;
         for nv in [4usize, 5, 6, 7, 8, 9] {
             let (pp, vp) = srs.trim(nv)?;
             let big_ml = pp.big_ml();
@@ -562,7 +562,7 @@ mod tests {
     fn test_srs_sizes() -> Result<(), PCSError> {
         let mut rng = test_rng();
         for nv in [4usize, 5, 8] {
-            let srs = NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs = CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
             assert_eq!(srs.g1_powers.len(), 1usize << nv, "G1 must be exactly N");
         }
         Ok(())
@@ -572,7 +572,7 @@ mod tests {
     fn test_srs_rejects_small_nv() {
         let mut rng = test_rng();
         for nv in [0usize, 1, 2, 3] {
-            assert!(NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv).is_err());
+            assert!(CarinaUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv).is_err());
         }
     }
 }

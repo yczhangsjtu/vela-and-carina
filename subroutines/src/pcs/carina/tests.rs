@@ -1,4 +1,4 @@
-//! Correctness, tamper, panic-safety, and batch tests for NRG-KZG.
+//! Correctness, tamper, panic-safety, and batch tests for Carina.
 
 use super::*;
 use crate::pcs::PolynomialCommitmentScheme;
@@ -9,10 +9,10 @@ use ark_std::{test_rng, vec::Vec};
 
 type E = Bls12_381;
 
-fn setup(nv: usize) -> (NestedGridKzgProverParam<E>, NestedGridKzgVerifierParam<E>) {
+fn setup(nv: usize) -> (CarinaProverParam<E>, CarinaVerifierParam<E>) {
     let mut rng = test_rng();
-    let srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap();
-    NestedGridKzgPCS::<E>::trim(&srs, None, Some(nv)).unwrap()
+    let srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap();
+    CarinaPCS::<E>::trim(&srs, None, Some(nv)).unwrap()
 }
 
 fn rand_poly(nv: usize, rng: &mut impl Rng) -> Arc<DenseMultilinearExtension<Fr>> {
@@ -80,12 +80,12 @@ fn test_single_open_verify_even_and_odd() -> Result<(), PCSError> {
         let (ck, vk) = setup(nv);
         let poly = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
-        let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-        let (proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+        let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+        let (proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
         // value equals the direct multilinear evaluation
         assert_eq!(value, poly.evaluate(&point).unwrap());
         assert!(
-            NestedGridKzgPCS::<E>::verify(&vk, &com, &point, &value, &proof)?,
+            CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?,
             "verify failed at nv={nv}"
         );
         // payload is exactly 4 G1 + 8 F
@@ -107,11 +107,9 @@ fn test_core_open_matches_trait_open() -> Result<(), PCSError> {
     let (ck, vk) = setup(nv);
     let poly = rand_poly(nv, &mut rng);
     let point = rand_point(nv, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open_with_commitment(&ck, &poly, &point, &com)?;
-    assert!(NestedGridKzgPCS::<E>::verify(
-        &vk, &com, &point, &value, &proof
-    )?);
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = CarinaPCS::<E>::open_with_commitment(&ck, &poly, &point, &com)?;
+    assert!(CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
     Ok(())
 }
 
@@ -121,7 +119,7 @@ fn test_commitment_matches_reference_bivariate_msm() -> Result<(), PCSError> {
     let nv = 6;
     let (ck, _vk) = setup(nv);
     let poly = rand_poly(nv, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
     let big_ml = ck.big_ml();
     let big_mr = ck.big_mr();
     let mut reference = <E as Pairing>::G1::zero();
@@ -321,9 +319,9 @@ fn test_reject_wrong_value() -> Result<(), PCSError> {
     let (ck, vk) = setup(5);
     let poly = rand_poly(5, &mut rng);
     let point = rand_point(5, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
-    rejected(NestedGridKzgPCS::<E>::verify(
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
+    rejected(CarinaPCS::<E>::verify(
         &vk,
         &com,
         &point,
@@ -339,13 +337,11 @@ fn test_reject_wrong_point() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
     let mut wrong = point.clone();
     wrong[0] += Fr::one();
-    rejected(NestedGridKzgPCS::<E>::verify(
-        &vk, &com, &wrong, &value, &proof,
-    ));
+    rejected(CarinaPCS::<E>::verify(&vk, &com, &wrong, &value, &proof));
     Ok(())
 }
 
@@ -356,11 +352,9 @@ fn test_reject_wrong_commitment() -> Result<(), PCSError> {
     let poly = rand_poly(6, &mut rng);
     let poly2 = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com2 = NestedGridKzgPCS::<E>::commit(&ck, &poly2)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
-    rejected(NestedGridKzgPCS::<E>::verify(
-        &vk, &com2, &point, &value, &proof,
-    ));
+    let com2 = CarinaPCS::<E>::commit(&ck, &poly2)?;
+    let (proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
+    rejected(CarinaPCS::<E>::verify(&vk, &com2, &point, &value, &proof));
     Ok(())
 }
 
@@ -372,12 +366,10 @@ macro_rules! tamper_g1_test {
             let (ck, vk) = setup(6);
             let poly = rand_poly(6, &mut rng);
             let point = rand_point(6, &mut rng);
-            let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-            let (mut proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+            let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+            let (mut proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
             proof.$field = (proof.$field.into_group() * Fr::from(2u64)).into_affine();
-            rejected(NestedGridKzgPCS::<E>::verify(
-                &vk, &com, &point, &value, &proof,
-            ));
+            rejected(CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof));
             Ok(())
         }
     };
@@ -395,12 +387,10 @@ macro_rules! tamper_scalar_test {
             let (ck, vk) = setup(6);
             let poly = rand_poly(6, &mut rng);
             let point = rand_point(6, &mut rng);
-            let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-            let (mut proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+            let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+            let (mut proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
             proof.$field += Fr::one();
-            rejected(NestedGridKzgPCS::<E>::verify(
-                &vk, &com, &point, &value, &proof,
-            ));
+            rejected(CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof));
             Ok(())
         }
     };
@@ -420,13 +410,11 @@ fn test_swap_two_grid_values() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
     if proof.v_pp != proof.v_nn {
         core::mem::swap(&mut proof.v_pp, &mut proof.v_nn);
-        rejected(NestedGridKzgPCS::<E>::verify(
-            &vk, &com, &point, &value, &proof,
-        ));
+        rejected(CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof));
     }
     Ok(())
 }
@@ -437,12 +425,10 @@ fn test_reject_wrong_mu() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
     proof.mu = 5;
-    rejected(NestedGridKzgPCS::<E>::verify(
-        &vk, &com, &point, &value, &proof,
-    ));
+    rejected(CarinaPCS::<E>::verify(&vk, &com, &point, &value, &proof));
     Ok(())
 }
 
@@ -451,14 +437,14 @@ fn test_reject_wrong_mu() -> Result<(), PCSError> {
 // ════════════════════════════════════════════════════════════════════
 
 fn assert_no_panic_verify(
-    vk: &NestedGridKzgVerifierParam<E>,
+    vk: &CarinaVerifierParam<E>,
     com: &Commitment<E>,
     point: &[Fr],
     value: &Fr,
-    proof: &NestedGridKzgProof<E>,
+    proof: &CarinaProof<E>,
 ) {
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        NestedGridKzgPCS::<E>::verify(vk, com, &point.to_vec(), value, proof)
+        CarinaPCS::<E>::verify(vk, com, &point.to_vec(), value, proof)
     }));
     match res {
         Ok(verdict) => assert!(
@@ -474,7 +460,7 @@ fn test_srs_gen_rejects_small_nv_no_panic() {
     let mut rng = test_rng();
     for nv in [0usize, 1, 2, 3] {
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, nv)
+            CarinaPCS::<E>::gen_srs_for_testing(&mut rng, nv)
         }));
         assert!(matches!(res, Ok(Err(_))), "nv={nv} must Err, not panic");
     }
@@ -486,8 +472,8 @@ fn test_verify_malicious_mu_values() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (base_proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (base_proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
     for bad_mu in [0u32, 3, u32::MAX, usize::BITS, 60] {
         let mut proof = base_proof.clone();
         proof.mu = bad_mu;
@@ -502,11 +488,11 @@ fn test_verify_wrong_point_length_no_panic() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open(&ck, &poly, &point)?;
+    let com = CarinaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = CarinaPCS::<E>::open(&ck, &poly, &point)?;
     for len in [0usize, 2, 5, 7, 12] {
         let p = rand_point(len, &mut rng);
-        let res = NestedGridKzgPCS::<E>::verify(&vk, &com, &p, &value, &proof);
+        let res = CarinaPCS::<E>::verify(&vk, &com, &p, &value, &proof);
         assert!(res.is_err() || !res.unwrap(), "len {len} must be rejected");
     }
     Ok(())
@@ -516,14 +502,14 @@ fn test_verify_wrong_point_length_no_panic() -> Result<(), PCSError> {
 fn test_verifier_key_capacity_insufficient() -> Result<(), PCSError> {
     let mut rng = test_rng();
     // Prove at nv=8 but verify with a key trimmed to nv=6.
-    let srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
-    let (ck8, _vk8) = NestedGridKzgPCS::<E>::trim(&srs, None, Some(8))?;
-    let (_ck6, vk6) = NestedGridKzgPCS::<E>::trim(&srs, None, Some(6))?;
+    let srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
+    let (ck8, _vk8) = CarinaPCS::<E>::trim(&srs, None, Some(8))?;
+    let (_ck6, vk6) = CarinaPCS::<E>::trim(&srs, None, Some(6))?;
     let poly = rand_poly(8, &mut rng);
     let point = rand_point(8, &mut rng);
-    let com = NestedGridKzgPCS::<E>::commit(&ck8, &poly)?;
-    let (proof, value) = NestedGridKzgPCS::<E>::open(&ck8, &poly, &point)?;
-    let res = NestedGridKzgPCS::<E>::verify(&vk6, &com, &point, &value, &proof);
+    let com = CarinaPCS::<E>::commit(&ck8, &poly)?;
+    let (proof, value) = CarinaPCS::<E>::open(&ck8, &poly, &point)?;
+    let res = CarinaPCS::<E>::verify(&vk6, &com, &point, &value, &proof);
     assert!(res.is_err(), "vk capacity too small must Err");
     Ok(())
 }
@@ -532,25 +518,25 @@ fn test_verifier_key_capacity_insufficient() -> Result<(), PCSError> {
 fn test_prover_key_too_small() -> Result<(), PCSError> {
     let mut rng = test_rng();
     // SRS supports only nv=4; requesting nv=6 must fail.
-    let srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 4)?;
-    assert!(NestedGridKzgPCS::<E>::trim(&srs, None, Some(6)).is_err());
+    let srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 4)?;
+    assert!(CarinaPCS::<E>::trim(&srs, None, Some(6)).is_err());
     // Dimension mismatch between prover param and polynomial must fail.
-    let big = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
-    let (ck4, _) = NestedGridKzgPCS::<E>::trim(&big, None, Some(4))?;
+    let big = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
+    let (ck4, _) = CarinaPCS::<E>::trim(&big, None, Some(4))?;
     let poly6 = rand_poly(6, &mut rng);
-    assert!(NestedGridKzgPCS::<E>::commit(&ck4, &poly6).is_err());
+    assert!(CarinaPCS::<E>::commit(&ck4, &poly6).is_err());
     let point6 = rand_point(6, &mut rng);
-    assert!(NestedGridKzgPCS::<E>::open(&ck4, &poly6, &point6).is_err());
+    assert!(CarinaPCS::<E>::open(&ck4, &poly6, &point6).is_err());
     Ok(())
 }
 
 #[test]
 fn test_srs_trim_illegal_sizes() -> Result<(), PCSError> {
     let mut rng = test_rng();
-    let srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
-    assert!(NestedGridKzgPCS::<E>::trim(&srs, None, Some(3)).is_err());
-    assert!(NestedGridKzgPCS::<E>::trim(&srs, None, Some(0)).is_err());
-    assert!(NestedGridKzgPCS::<E>::trim(&srs, None, Some(9)).is_err());
+    let srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 8)?;
+    assert!(CarinaPCS::<E>::trim(&srs, None, Some(3)).is_err());
+    assert!(CarinaPCS::<E>::trim(&srs, None, Some(0)).is_err());
+    assert!(CarinaPCS::<E>::trim(&srs, None, Some(9)).is_err());
     Ok(())
 }
 
@@ -571,13 +557,13 @@ fn test_transcript_statement_binding() -> Result<(), PCSError> {
     let (ck, vk) = setup(6);
     let poly_a = rand_poly(6, &mut rng);
     let point_a = rand_point(6, &mut rng);
-    let _com_a = NestedGridKzgPCS::<E>::commit(&ck, &poly_a)?;
-    let (proof_a, value_a) = NestedGridKzgPCS::<E>::open(&ck, &poly_a, &point_a)?;
+    let _com_a = CarinaPCS::<E>::commit(&ck, &poly_a)?;
+    let (proof_a, value_a) = CarinaPCS::<E>::open(&ck, &poly_a, &point_a)?;
 
     // different commitment
     let poly_b = rand_poly(6, &mut rng);
-    let com_b = NestedGridKzgPCS::<E>::commit(&ck, &poly_b)?;
-    rejected(NestedGridKzgPCS::<E>::verify(
+    let com_b = CarinaPCS::<E>::commit(&ck, &poly_b)?;
+    rejected(CarinaPCS::<E>::verify(
         &vk, &com_b, &point_a, &value_a, &proof_a,
     ));
     Ok(())
@@ -599,14 +585,14 @@ fn batch_roundtrip(k: usize, points: Vec<Vec<Fr>>) -> Result<bool, PCSError> {
         .collect();
     let comms: Vec<_> = polys
         .iter()
-        .map(|p| NestedGridKzgPCS::<E>::commit(&ck, p).unwrap())
+        .map(|p| CarinaPCS::<E>::commit(&ck, p).unwrap())
         .collect();
     let mut tp = IOPTranscript::new(b"batch-test");
     tp.append_field_element(b"init", &Fr::zero())?;
-    let proof = NestedGridKzgPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+    let proof = CarinaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
     let mut tv = IOPTranscript::new(b"batch-test");
     tv.append_field_element(b"init", &Fr::zero())?;
-    NestedGridKzgPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv)
+    CarinaPCS::<E>::batch_verify(&vk, &comms, &points, &proof, &mut tv)
 }
 
 #[test]
@@ -648,15 +634,15 @@ fn test_batch_rejects_wrong_eval() -> Result<(), PCSError> {
         .collect();
     let comms: Vec<_> = polys
         .iter()
-        .map(|p| NestedGridKzgPCS::<E>::commit(&ck, p).unwrap())
+        .map(|p| CarinaPCS::<E>::commit(&ck, p).unwrap())
         .collect();
     evals[0] += Fr::one();
     let mut tp = IOPTranscript::new(b"batch-test");
     tp.append_field_element(b"init", &Fr::zero())?;
-    let proof = NestedGridKzgPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+    let proof = CarinaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
     let mut tv = IOPTranscript::new(b"batch-test");
     tv.append_field_element(b"init", &Fr::zero())?;
-    rejected(NestedGridKzgPCS::<E>::batch_verify(
+    rejected(CarinaPCS::<E>::batch_verify(
         &vk, &comms, &points, &proof, &mut tv,
     ));
     Ok(())
@@ -676,16 +662,16 @@ fn test_batch_rejects_wrong_commitment() -> Result<(), PCSError> {
         .collect();
     let mut comms: Vec<_> = polys
         .iter()
-        .map(|p| NestedGridKzgPCS::<E>::commit(&ck, p).unwrap())
+        .map(|p| CarinaPCS::<E>::commit(&ck, p).unwrap())
         .collect();
     let mut tp = IOPTranscript::new(b"batch-test");
     tp.append_field_element(b"init", &Fr::zero())?;
-    let proof = NestedGridKzgPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+    let proof = CarinaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
     // corrupt one commitment
-    comms[1] = NestedGridKzgPCS::<E>::commit(&ck, &rand_poly(nv, &mut rng))?;
+    comms[1] = CarinaPCS::<E>::commit(&ck, &rand_poly(nv, &mut rng))?;
     let mut tv = IOPTranscript::new(b"batch-test");
     tv.append_field_element(b"init", &Fr::zero())?;
-    rejected(NestedGridKzgPCS::<E>::batch_verify(
+    rejected(CarinaPCS::<E>::batch_verify(
         &vk, &comms, &points, &proof, &mut tv,
     ));
     Ok(())
@@ -701,6 +687,6 @@ fn test_batch_malformed_lengths() -> Result<(), PCSError> {
     let evals: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
     let mut tp = IOPTranscript::new(b"batch-test");
     tp.append_field_element(b"init", &Fr::zero())?;
-    assert!(NestedGridKzgPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp).is_err());
+    assert!(CarinaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp).is_err());
     Ok(())
 }

@@ -32,10 +32,6 @@ pub(crate) mod srs;
 mod util;
 
 use srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam};
-// The symmetric construction was moved to the standalone ReciPCS module.
-// Keep these legacy convenience aliases; they no longer select a second
-// implementation or a separate benchmark backend.
-pub use crate::pcs::recipcs::{ReciPCS as MulcsSymmetricPCS, ReciProof as MulcsSymmetricProof};
 pub(crate) use util::UnivarPoly;
 
 pub struct MulcsPCS<E: Pairing> {

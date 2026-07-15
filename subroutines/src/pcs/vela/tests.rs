@@ -1,4 +1,4 @@
-//! ReciPCS test suite: positive, negative, edge-case, and property tests.
+//! VelaPCS test suite: positive, negative, edge-case, and property tests.
 
 use super::*;
 use ark_bls12_381::{Bls12_381, Fr};
@@ -7,10 +7,10 @@ use ark_std::{test_rng, One, UniformRand, Zero};
 
 type E = Bls12_381;
 
-fn setup(nv: usize) -> (ReciProverParam<E>, ReciVerifierParam<E>) {
+fn setup(nv: usize) -> (VelaProverParam<E>, VelaVerifierParam<E>) {
     let mut rng = test_rng();
-    let srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap();
-    ReciPCS::<E>::trim(&srs, None, Some(nv)).unwrap()
+    let srs = VelaPCS::<E>::gen_srs_for_testing(&mut rng, nv).unwrap();
+    VelaPCS::<E>::trim(&srs, None, Some(nv)).unwrap()
 }
 
 fn rand_point(nv: usize, rng: &mut impl Rng) -> Vec<Fr> {
@@ -29,10 +29,10 @@ fn test_commit_open_verify() -> Result<(), PCSError> {
         let (ck, vk) = setup(nv);
         let poly = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
-        let com = ReciPCS::<E>::commit(&ck, &poly)?;
-        let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+        let com = VelaPCS::<E>::commit(&ck, &poly)?;
+        let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
         assert_eq!(value, poly.evaluate(&point).unwrap());
-        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+        assert!(VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
     }
     Ok(())
 }
@@ -44,7 +44,7 @@ fn test_proof_shape_bytes() -> Result<(), PCSError> {
     let (ck, _vk) = setup(6);
     let poly = rand_poly(6, &mut rng);
     let point = rand_point(6, &mut rng);
-    let (proof, _) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let (proof, _) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     let g1 = {
         let mut b = vec![];
         proof.cm_hbar.serialize_compressed(&mut b).unwrap();
@@ -60,7 +60,7 @@ fn test_proof_shape_bytes() -> Result<(), PCSError> {
     // 2 G1 + 4 F + a small mu (usize). Assert the group/field payload matches.
     assert!(all.len() >= 2 * g1 + 4 * fr);
     println!(
-        "ReciPCS proof: 2 G1 ({} B) + 4 F ({} B) = {} B payload; serialized {} B",
+        "VelaPCS proof: 2 G1 ({} B) + 4 F ({} B) = {} B payload; serialized {} B",
         g1,
         fr,
         2 * g1 + 4 * fr,
@@ -76,13 +76,13 @@ fn test_reject_wrong_value() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     let mut wrong = value + Fr::one();
     if wrong == value {
         wrong += Fr::one();
     }
-    assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &wrong, &proof)?);
+    assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &wrong, &proof)?);
     Ok(())
 }
 
@@ -92,11 +92,11 @@ fn test_reject_wrong_point() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     let wp = rand_point(4, &mut rng);
     if wp != point {
-        assert!(!ReciPCS::<E>::verify(&vk, &com, &wp, &value, &proof)?);
+        assert!(!VelaPCS::<E>::verify(&vk, &com, &wp, &value, &proof)?);
     }
     Ok(())
 }
@@ -108,9 +108,9 @@ fn test_reject_wrong_commitment() -> Result<(), PCSError> {
     let poly = rand_poly(4, &mut rng);
     let poly2 = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com2 = ReciPCS::<E>::commit(&ck, &poly2)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
-    assert!(!ReciPCS::<E>::verify(&vk, &com2, &point, &value, &proof)?);
+    let com2 = VelaPCS::<E>::commit(&ck, &poly2)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
+    assert!(!VelaPCS::<E>::verify(&vk, &com2, &point, &value, &proof)?);
     Ok(())
 }
 
@@ -123,10 +123,10 @@ macro_rules! tamper_test {
             let (ck, vk) = setup(4);
             let poly = rand_poly(4, &mut rng);
             let point = rand_point(4, &mut rng);
-            let com = ReciPCS::<E>::commit(&ck, &poly)?;
-            let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+            let com = VelaPCS::<E>::commit(&ck, &poly)?;
+            let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
             proof.$field += Fr::one();
-            assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+            assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
             Ok(())
         }
     };
@@ -142,10 +142,10 @@ fn test_reject_tampered_cm_hbar() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     proof.cm_hbar = (proof.cm_hbar.into_group() * Fr::from(2u64)).into_affine();
-    assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+    assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
     Ok(())
 }
 
@@ -155,16 +155,16 @@ fn test_reject_tampered_pi() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     proof.pi = (proof.pi.into_group() * Fr::from(3u64)).into_affine();
-    assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+    assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
     Ok(())
 }
 
 // ── Tampered z: since z is Fiat-Shamir-derived, the verifier recomputes it and
 //    a stale/forged z cannot be injected through the proof (z is not a field of
-//    ReciProof). This test forges a proof by rerunning the prover with a
+//    VelaProof). This test forges a proof by rerunning the prover with a
 // poisoned    transcript and checks the honest verifier rejects it. ──
 #[test]
 fn test_reject_tampered_alpha_via_transcript_desync() -> Result<(), PCSError> {
@@ -175,8 +175,8 @@ fn test_reject_tampered_alpha_via_transcript_desync() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
 
     // Recompute pi with a wrong alpha and splice it in.
     let coeffs = poly.to_evaluations();
@@ -195,7 +195,7 @@ fn test_reject_tampered_alpha_via_transcript_desync() -> Result<(), PCSError> {
     let bogus_pi = ck.commit(&q)?;
     let mut forged = proof.clone();
     forged.pi = bogus_pi;
-    assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &value, &forged)?);
+    assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &value, &forged)?);
     Ok(())
 }
 
@@ -206,10 +206,10 @@ fn test_reject_malformed_mu() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     proof.mu = 5; // inconsistent with the 4-length point
-    let r = ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof);
+    let r = VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof);
     assert!(r.is_err() || !r.unwrap());
     Ok(())
 }
@@ -221,12 +221,12 @@ fn test_reject_wrong_point_len_no_panic() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     let short = rand_point(2, &mut rng);
-    assert!(ReciPCS::<E>::verify(&vk, &com, &short, &value, &proof).is_err());
+    assert!(VelaPCS::<E>::verify(&vk, &com, &short, &value, &proof).is_err());
     let long = rand_point(8, &mut rng);
-    assert!(ReciPCS::<E>::verify(&vk, &com, &long, &value, &proof).is_err());
+    assert!(VelaPCS::<E>::verify(&vk, &com, &long, &value, &proof).is_err());
     Ok(())
 }
 
@@ -237,11 +237,11 @@ fn test_reject_huge_mu_no_panic() -> Result<(), PCSError> {
     let (ck, vk) = setup(2);
     let poly = rand_poly(2, &mut rng);
     let point = rand_point(2, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     proof.mu = usize::BITS as usize;
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)
+        VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)
     }));
     match r {
         Ok(verdict) => assert!(verdict.is_err() || !verdict.unwrap()),
@@ -283,15 +283,15 @@ fn test_batching_decoupling_attack_rejected() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (mut proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (mut proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     // Shift both f_z and hbar_z; a naive batching-only check might be fooled for
-    // some alpha, but ReciPCS binds alpha after the evals and also runs the
+    // some alpha, but VelaPCS binds alpha after the evals and also runs the
     // identity check.
     let d = Fr::rand(&mut rng);
     proof.f_z += d;
     proof.hbar_z += d;
-    assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+    assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
     Ok(())
 }
 
@@ -349,14 +349,14 @@ fn test_property_wrong_value_rejected() -> Result<(), PCSError> {
         let (ck, vk) = setup(nv);
         let poly = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
-        let com = ReciPCS::<E>::commit(&ck, &poly)?;
-        let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
-        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
+        let com = VelaPCS::<E>::commit(&ck, &poly)?;
+        let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
+        assert!(VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof)?);
         let mut wrong = Fr::rand(&mut rng);
         if wrong == value {
             wrong += Fr::one();
         }
-        assert!(!ReciPCS::<E>::verify(&vk, &com, &point, &wrong, &proof)?);
+        assert!(!VelaPCS::<E>::verify(&vk, &com, &point, &wrong, &proof)?);
     }
     Ok(())
 }
@@ -369,13 +369,13 @@ fn test_proof_serialization_roundtrip() -> Result<(), PCSError> {
     let (ck, vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
     let point = rand_point(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
-    let (proof, value) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
+    let (proof, value) = VelaPCS::<E>::open(&ck, &poly, &point)?;
     let mut bytes = vec![];
     proof.serialize_compressed(&mut bytes).unwrap();
-    let proof2 = ReciProof::<E>::deserialize_compressed(&bytes[..]).unwrap();
+    let proof2 = VelaProof::<E>::deserialize_compressed(&bytes[..]).unwrap();
     assert_eq!(proof, proof2);
-    assert!(ReciPCS::<E>::verify(&vk, &com, &point, &value, &proof2)?);
+    assert!(VelaPCS::<E>::verify(&vk, &com, &point, &value, &proof2)?);
     Ok(())
 }
 
@@ -400,14 +400,14 @@ fn batch_case(k: usize, same_point: bool) -> Result<(), PCSError> {
         .collect();
     let coms: Vec<_> = polys
         .iter()
-        .map(|p| ReciPCS::<E>::commit(&ck, p).unwrap())
+        .map(|p| VelaPCS::<E>::commit(&ck, p).unwrap())
         .collect();
-    let mut tp = IOPTranscript::new(b"recipcs-batch-test");
+    let mut tp = IOPTranscript::new(b"vela-batch-test");
     tp.append_field_element(b"init", &Fr::zero())?;
-    let bp = ReciPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
-    let mut tv = IOPTranscript::new(b"recipcs-batch-test");
+    let bp = VelaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+    let mut tv = IOPTranscript::new(b"vela-batch-test");
     tv.append_field_element(b"init", &Fr::zero())?;
-    assert!(ReciPCS::<E>::batch_verify(
+    assert!(VelaPCS::<E>::batch_verify(
         &vk, &coms, &points, &bp, &mut tv
     )?);
     Ok(())
@@ -445,15 +445,15 @@ fn test_batch_rejects_wrong_eval() -> Result<(), PCSError> {
         .collect();
     let coms: Vec<_> = polys
         .iter()
-        .map(|p| ReciPCS::<E>::commit(&ck, p).unwrap())
+        .map(|p| VelaPCS::<E>::commit(&ck, p).unwrap())
         .collect();
     evals[0] += Fr::one();
     let mut tp = IOPTranscript::new(b"t");
     tp.append_field_element(b"init", &Fr::zero())?;
-    let bp = ReciPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
+    let bp = VelaPCS::<E>::multi_open(&ck, &polys, &points, &evals, &mut tp)?;
     let mut tv = IOPTranscript::new(b"t");
     tv.append_field_element(b"init", &Fr::zero())?;
-    let r = ReciPCS::<E>::batch_verify(&vk, &coms, &points, &bp, &mut tv);
+    let r = VelaPCS::<E>::batch_verify(&vk, &coms, &points, &bp, &mut tv);
     assert!(r.is_err() || !r.unwrap());
     Ok(())
 }
@@ -467,12 +467,12 @@ fn test_open_with_commitment_matches_trait_open() -> Result<(), PCSError> {
         let poly = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
         let value = poly.evaluate(&point).unwrap();
-        let com = ReciPCS::<E>::commit(&ck, &poly)?;
-        let (proof_a, val_a) = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
-        let (proof_b, val_b) = ReciPCS::<E>::open(&ck, &poly, &point)?;
+        let com = VelaPCS::<E>::commit(&ck, &poly)?;
+        let (proof_a, val_a) = VelaPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
+        let (proof_b, val_b) = VelaPCS::<E>::open(&ck, &poly, &point)?;
         assert_eq!(val_a, val_b);
-        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val_a, &proof_a)?);
-        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val_b, &proof_b)?);
+        assert!(VelaPCS::<E>::verify(&vk, &com, &point, &val_a, &proof_a)?);
+        assert!(VelaPCS::<E>::verify(&vk, &com, &point, &val_b, &proof_b)?);
     }
     Ok(())
 }
@@ -487,18 +487,18 @@ fn test_open_with_commitment_rejects_wrong_commitment() -> Result<(), PCSError> 
         let poly2 = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
         let value = poly.evaluate(&point).unwrap();
-        let wrong_com = ReciPCS::<E>::commit(&ck, &poly2)?;
-        let r = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &wrong_com);
+        let wrong_com = VelaPCS::<E>::commit(&ck, &poly2)?;
+        let r = VelaPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &wrong_com);
         if let Ok((proof, val)) = r {
-            let com = ReciPCS::<E>::commit(&ck, &poly)?;
+            let com = VelaPCS::<E>::commit(&ck, &poly)?;
             // Verify with the SAME vk from the initial setup
             assert!(
-                !ReciPCS::<E>::verify(&vk, &com, &point, &val, &proof)?,
+                !VelaPCS::<E>::verify(&vk, &com, &point, &val, &proof)?,
                 "wrong commitment should not produce verifiable proof"
             );
             // Also assert it doesn't verify under the wrong commitment
             assert!(
-                !ReciPCS::<E>::verify(&vk, &wrong_com, &point, &val, &proof)?,
+                !VelaPCS::<E>::verify(&vk, &wrong_com, &point, &val, &proof)?,
                 "proof under wrong commitment should not verify"
             );
         }
@@ -515,12 +515,12 @@ fn test_open_with_commitment_valid_proof_accepted() -> Result<(), PCSError> {
         let poly = rand_poly(nv, &mut rng);
         let point = rand_point(nv, &mut rng);
         let value = poly.evaluate(&point).unwrap();
-        let com = ReciPCS::<E>::commit(&ck, &poly)?;
-        let (proof, val) = ReciPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
+        let com = VelaPCS::<E>::commit(&ck, &poly)?;
+        let (proof, val) = VelaPCS::<E>::open_with_commitment(&ck, &poly, &point, value, &com)?;
         assert_eq!(val, value);
-        assert!(ReciPCS::<E>::verify(&vk, &com, &point, &val, &proof)?);
+        assert!(VelaPCS::<E>::verify(&vk, &com, &point, &val, &proof)?);
         // Wrong value must be rejected.
-        assert!(!ReciPCS::<E>::verify(
+        assert!(!VelaPCS::<E>::verify(
             &vk,
             &com,
             &point,
@@ -537,11 +537,11 @@ fn test_open_with_commitment_wrong_point_len_no_panic() -> Result<(), PCSError> 
     let mut rng = test_rng();
     let (ck, _vk) = setup(4);
     let poly = rand_poly(4, &mut rng);
-    let com = ReciPCS::<E>::commit(&ck, &poly)?;
+    let com = VelaPCS::<E>::commit(&ck, &poly)?;
     let value = poly.evaluate(&[Fr::zero(); 4]).unwrap();
     let short = vec![Fr::zero(); 2];
-    assert!(ReciPCS::<E>::open_with_commitment(&ck, &poly, &short, value, &com).is_err());
+    assert!(VelaPCS::<E>::open_with_commitment(&ck, &poly, &short, value, &com).is_err());
     let long = vec![Fr::zero(); 8];
-    assert!(ReciPCS::<E>::open_with_commitment(&ck, &poly, &long, value, &com).is_err());
+    assert!(VelaPCS::<E>::open_with_commitment(&ck, &poly, &long, value, &com).is_err());
     Ok(())
 }

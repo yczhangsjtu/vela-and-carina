@@ -12,7 +12,7 @@ mod tests {
     };
     use subroutines::{
         pcs::{
-            prelude::{GeminiPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{GeminiPCS, MultilinearKzgPCS, SamaritanPCS, VelaPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -58,7 +58,7 @@ mod tests {
         let nv = 5;
         let size = 1 << nv;
         let mkzg_srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
-        let reci_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let vela_srs = VelaPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let zm_srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let sam_srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let gem_srs = GeminiPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
@@ -81,17 +81,17 @@ mod tests {
             MultilinearKzgPCS<E>,
         >>::verify(&vk, &circuit.public_inputs, &proof)?);
 
-        // ReciPCS (the canonical symmetric reciprocal construction)
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+        // Vela
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::preprocess(
             &circuit.index,
-            &reci_srs,
+            &vela_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
-        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+        assert!(<PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::verify(
             &vk,
             &circuit.public_inputs,
             &proof

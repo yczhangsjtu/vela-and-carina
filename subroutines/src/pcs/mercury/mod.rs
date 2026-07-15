@@ -1094,8 +1094,8 @@ fn mercury_core_verify<E: Pairing>(
     // Negate the right side so the product form
     //   e(ll, [1]_2) * e(-rl, [tau]_2) = 1_{G_T}
     // is equivalent to the two-pairing equality e(ll, [1]_2) == e(rl, [tau]_2).
-    // This is the same multi_pairing idiom used by the ReciPCS / Gemini /
-    // Zeromorph / Samaritan / NestedGridKZG verifiers in this repo: one Miller
+    // This is the same multi_pairing idiom used by the VelaPCS / Gemini /
+    // Zeromorph / Samaritan / Carina verifiers in this repo: one Miller
     // loop + one final exponentiation instead of two separate pairings.
     let neg_rl = (-(lhs_2_1 + lhs_2_2 * d_pair)).into_affine();
 

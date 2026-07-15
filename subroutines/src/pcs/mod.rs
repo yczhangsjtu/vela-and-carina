@@ -5,6 +5,7 @@
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
 pub(crate) mod bdfg;
+mod carina;
 mod chopin;
 mod errors;
 mod gemini;
@@ -12,12 +13,11 @@ mod laurent;
 mod mercury;
 mod mulcs;
 mod multilinear_kzg;
-mod nested_grid_kzg;
 pub(crate) mod profile;
-mod recipcs;
 mod samaritan;
 mod structs;
 mod univariate_kzg;
+mod vela;
 mod zeromorph;
 
 pub mod prelude;

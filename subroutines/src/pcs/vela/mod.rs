@@ -1,7 +1,7 @@
-//! ReciPCS — reciprocal polynomial commitment scheme for multilinear
+//! VelaPCS — reciprocal polynomial commitment scheme for multilinear
 //! polynomials.
 //!
-//! ReciPCS encodes the coefficient vector of a mu-variate multilinear
+//! VelaPCS encodes the coefficient vector of a mu-variate multilinear
 //! polynomial f as a univariate polynomial f_v(X) = sum_i a_i X^i (N = 2^mu
 //! coefficients). For an evaluation point r it builds the tensor polynomial
 //!   T_r(X) = prod_{k=0}^{mu-1} ((1-r_k) + r_k X^{2^k}),  [X^j] T_r = eq(j; r),
@@ -51,16 +51,16 @@ use transcript::IOPTranscript;
 
 pub mod srs;
 
-use srs::{ReciProverParam, ReciUniversalParams, ReciVerifierParam};
+use srs::{VelaProverParam, VelaUniversalParams, VelaVerifierParam};
 
-/// ReciPCS scheme handle.
-pub struct ReciPCS<E: Pairing> {
+/// VelaPCS scheme handle.
+pub struct VelaPCS<E: Pairing> {
     phantom: PhantomData<E>,
 }
 
-/// ReciPCS opening proof: 2 group elements + 4 field elements.
+/// VelaPCS opening proof: 2 group elements + 4 field elements.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct ReciProof<E: Pairing> {
+pub struct VelaProof<E: Pairing> {
     /// Commitment to the reciprocal witness hbar.
     pub cm_hbar: E::G1Affine,
     /// Batched KZG opening proof at {z, z^{-1}}.
@@ -77,35 +77,35 @@ pub struct ReciProof<E: Pairing> {
     pub mu: usize,
 }
 
-const LABEL_MU: &[u8] = b"recipcs::mu";
-const LABEL_CM_F: &[u8] = b"recipcs::cm_f";
-const LABEL_POINT: &[u8] = b"recipcs::point";
-const LABEL_VALUE: &[u8] = b"recipcs::value";
-const LABEL_CM_HBAR: &[u8] = b"recipcs::cm_hbar";
-const LABEL_Z: &[u8] = b"recipcs::z";
-const LABEL_FZ: &[u8] = b"recipcs::f_z";
-const LABEL_FZI: &[u8] = b"recipcs::f_z_inv";
-const LABEL_HZ: &[u8] = b"recipcs::hbar_z";
-const LABEL_HZI: &[u8] = b"recipcs::hbar_z_inv";
-const LABEL_ALPHA: &[u8] = b"recipcs::alpha";
+const LABEL_MU: &[u8] = b"vela::mu";
+const LABEL_CM_F: &[u8] = b"vela::cm_f";
+const LABEL_POINT: &[u8] = b"vela::point";
+const LABEL_VALUE: &[u8] = b"vela::value";
+const LABEL_CM_HBAR: &[u8] = b"vela::cm_hbar";
+const LABEL_Z: &[u8] = b"vela::z";
+const LABEL_FZ: &[u8] = b"vela::f_z";
+const LABEL_FZI: &[u8] = b"vela::f_z_inv";
+const LABEL_HZ: &[u8] = b"vela::hbar_z";
+const LABEL_HZI: &[u8] = b"vela::hbar_z_inv";
+const LABEL_ALPHA: &[u8] = b"vela::alpha";
 
 // ════════════════════════════════════════════════════════════════════
 // PolynomialCommitmentScheme trait
 // ════════════════════════════════════════════════════════════════════
 
-impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
-    type ProverParam = ReciProverParam<E>;
-    type VerifierParam = ReciVerifierParam<E>;
-    type SRS = ReciUniversalParams<E>;
+impl<E: Pairing> PolynomialCommitmentScheme<E> for VelaPCS<E> {
+    type ProverParam = VelaProverParam<E>;
+    type VerifierParam = VelaVerifierParam<E>;
+    type SRS = VelaUniversalParams<E>;
     type Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>;
     type Point = Vec<E::ScalarField>;
     type Evaluation = E::ScalarField;
     type Commitment = Commitment<E>;
-    type Proof = ReciProof<E>;
+    type Proof = VelaProof<E>;
     type BatchProof = BatchProof<E, Self>;
 
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, nv: usize) -> Result<Self::SRS, PCSError> {
-        ReciUniversalParams::<E>::gen_srs_for_testing(rng, nv)
+        VelaUniversalParams::<E>::gen_srs_for_testing(rng, nv)
     }
 
     fn trim(
@@ -159,7 +159,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
         let value = poly
             .evaluate(point)
             .ok_or_else(|| PCSError::InvalidParameters("evaluation failed".to_string()))?;
-        let cm_f = ReciPCS::<E>::commit(pp, poly)?;
+        let cm_f = VelaPCS::<E>::commit(pp, poly)?;
         Self::open_with_commitment(pp, poly, point, value, &cm_f)
     }
 
@@ -171,7 +171,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
         proof: &Self::Proof,
     ) -> Result<bool, PCSError> {
         let mut t = new_transcript::<E>(proof.mu, com, point, value)?;
-        recipcs_verify(vp, com, point, value, proof, &mut t)
+        vela_verify(vp, com, point, value, proof, &mut t)
     }
 
     fn multi_open(
@@ -207,18 +207,18 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for ReciPCS<E> {
     }
 }
 
-impl<E: Pairing> ReciPCS<E> {
+impl<E: Pairing> VelaPCS<E> {
     /// Open a polynomial at a point given a pre-computed commitment `cm_f`.
     ///
     /// This avoids the N-size MSM recommit that the trait `open` performs.
     /// The `commitment` MUST equal `commit(pp, poly)`.
     pub fn open_with_commitment(
-        pp: &ReciProverParam<E>,
+        pp: &VelaProverParam<E>,
         poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
         point: &[E::ScalarField],
         value: E::ScalarField,
         commitment: &Commitment<E>,
-    ) -> Result<(ReciProof<E>, E::ScalarField), PCSError> {
+    ) -> Result<(VelaProof<E>, E::ScalarField), PCSError> {
         let mu = poly.num_vars();
         if point.len() != mu {
             return Err(PCSError::InvalidParameters(format!(
@@ -228,7 +228,7 @@ impl<E: Pairing> ReciPCS<E> {
             )));
         }
         let mut t = new_transcript::<E>(mu, commitment, point, &value)?;
-        recipcs_open(pp, poly, point, &value, &mut t)
+        vela_open(pp, poly, point, &value, &mut t)
     }
 }
 
@@ -242,7 +242,7 @@ fn new_transcript<E: Pairing>(
     point: &[E::ScalarField],
     value: &E::ScalarField,
 ) -> Result<IOPTranscript<E::ScalarField>, PCSError> {
-    let mut t = IOPTranscript::new(b"recipcs-v1");
+    let mut t = IOPTranscript::new(b"vela-v1");
     t.append_field_element(LABEL_MU, &E::ScalarField::from(mu as u64))?;
     t.append_serializable_element(LABEL_CM_F, &cm_f.0)?;
     t.append_serializable_element(LABEL_POINT, &point.to_vec())?;
@@ -385,13 +385,13 @@ fn monic_div<F: Field>(a: &[F], b: &[F]) -> Vec<F> {
 // Prover
 // ════════════════════════════════════════════════════════════════════
 
-fn recipcs_open<E: Pairing>(
-    pp: &ReciProverParam<E>,
+fn vela_open<E: Pairing>(
+    pp: &VelaProverParam<E>,
     poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
     point: &[E::ScalarField],
     value: &E::ScalarField,
     transcript: &mut IOPTranscript<E::ScalarField>,
-) -> Result<(ReciProof<E>, E::ScalarField), PCSError> {
+) -> Result<(VelaProof<E>, E::ScalarField), PCSError> {
     let mu = poly.num_vars();
     if mu == 0 {
         return Err(PCSError::InvalidParameters(
@@ -446,7 +446,7 @@ fn recipcs_open<E: Pairing>(
     let pi = pp.commit(&q)?;
 
     Ok((
-        ReciProof {
+        VelaProof {
             cm_hbar,
             pi,
             f_z,
@@ -463,12 +463,12 @@ fn recipcs_open<E: Pairing>(
 // Verifier
 // ════════════════════════════════════════════════════════════════════
 
-fn recipcs_verify<E: Pairing>(
-    vp: &ReciVerifierParam<E>,
+fn vela_verify<E: Pairing>(
+    vp: &VelaVerifierParam<E>,
     com: &Commitment<E>,
     point: &[E::ScalarField],
     value: &E::ScalarField,
-    proof: &ReciProof<E>,
+    proof: &VelaProof<E>,
     transcript: &mut IOPTranscript<E::ScalarField>,
 ) -> Result<bool, PCSError> {
     let mu = proof.mu;

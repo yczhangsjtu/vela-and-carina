@@ -302,3 +302,10 @@ TSWLatexianTemp*
 *.txt
 srs.params
 *.logs/
+
+# Locally generated benchmark artifacts.
+/benchmark-results/
+/bench_results/
+/pcs_single_open_results.csv
+/*.metadata.txt
+/*.pid

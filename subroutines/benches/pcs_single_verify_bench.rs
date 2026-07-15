@@ -13,8 +13,8 @@ use criterion::{
 use std::{env, time::Duration};
 use subroutines::pcs::{
     prelude::{
-        ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, NestedGridKzgPCS, PCSError,
-        ReciPCS, SamaritanPCS, ZeromorphPCS,
+        CarinaPCS, ChopinPCS, GeminiPCS, MercuryPCS, MulcsPCS, MultilinearKzgPCS, PCSError,
+        SamaritanPCS, VelaPCS, ZeromorphPCS,
     },
     PolynomialCommitmentScheme,
 };
@@ -28,8 +28,8 @@ const ALL_BACKENDS: [&str; 9] = [
     "mulcs",
     "samaritan",
     "zeromorph",
-    "recipcs",
-    "nrg",
+    "vela",
+    "carina",
     "mercury",
     "chopin",
 ];
@@ -45,7 +45,7 @@ fn parse_nv_range() -> Vec<usize> {
     }
 }
 
-/// Parse `PCS_VERIFY_BACKEND`, default all. Supports friendly NRG aliases.
+/// Parse `PCS_VERIFY_BACKEND`, defaulting to all public backend names.
 fn parse_backends() -> Vec<String> {
     let raw = match env::var("PCS_VERIFY_BACKEND") {
         Ok(v) => v,
@@ -57,11 +57,7 @@ fn parse_backends() -> Vec<String> {
     if sel == "all" {
         return ALL_BACKENDS.iter().map(|s| s.to_string()).collect();
     }
-    let canonical = match sel.as_str() {
-        "symmetric" | "mulcs_symmetric" | "mulcs-symmetric" => "recipcs".to_string(),
-        "nestedgrid" | "nested-grid-kzg" | "nested_grid_kzg" => "nrg".to_string(),
-        other => other.to_string(),
-    };
+    let canonical = sel;
     if ALL_BACKENDS.contains(&canonical.as_str()) {
         vec![canonical]
     } else {
@@ -177,7 +173,7 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
     let nv_range = parse_nv_range();
     let backends = parse_backends();
 
-    // Only the selected backends are instantiated, so filtering to e.g. `nrg`
+    // Only the selected backends are instantiated, so filtering to e.g. `carina`
     // avoids pre-generating every other backend's large (nv=20) SRS.
     for nv in nv_range {
         for backend in &backends {
@@ -191,10 +187,8 @@ fn bench_pcs_single_verify(c: &mut Criterion) {
                 "zeromorph" => {
                     bench_backend::<ZeromorphPCS<E>>(&mut group, &mut rng, "Zeromorph", nv)
                 },
-                "recipcs" => bench_backend::<ReciPCS<E>>(&mut group, &mut rng, "ReciPCS", nv),
-                "nrg" => {
-                    bench_backend::<NestedGridKzgPCS<E>>(&mut group, &mut rng, "NestedGridKZG", nv)
-                },
+                "vela" => bench_backend::<VelaPCS<E>>(&mut group, &mut rng, "Vela", nv),
+                "carina" => bench_backend::<CarinaPCS<E>>(&mut group, &mut rng, "Carina", nv),
                 "mercury" => bench_backend::<MercuryPCS<E>>(&mut group, &mut rng, "Mercury", nv),
                 "chopin" => bench_backend::<ChopinPCS<E>>(&mut group, &mut rng, "Chopin", nv),
                 other => panic!("unreachable backend {other}"),

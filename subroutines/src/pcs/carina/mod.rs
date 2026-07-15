@@ -1,26 +1,13 @@
-//! Nested Reciprocal Grid-KZG (NRG-KZG) multilinear polynomial commitment.
+//! Carina is a pairing-based multilinear polynomial commitment scheme.
 //!
-//! This implements the candidate construction analysed in
-//! `research/pcs-field-map/proof-notes/nested-reciprocal-grid-kzg-mlpcs.md`
-//! and `...-soundness.md`. For a multilinear polynomial in `mu` variables it
-//! views the evaluation table as an `M_L x M_R` matrix `F[i,j]` and its
-//! bivariate twin `f(X,Y) = sum F[i,j] X^i Y^j`, then closes two nested
-//! reciprocal inner-product arguments and one aggregated bivariate KZG opening
-//! on the reciprocal Cartesian grid `{r,r^{-1}} x {s,s^{-1}}`.
+//! It interprets a multilinear evaluation table as a bivariate polynomial,
+//! applies coordinate-wise reciprocal reductions, and closes the resulting
+//! claims with a grid KZG opening. A Carina opening proof contains `4 G1 + 8 F`
+//! cryptographic elements, in addition to public dimension metadata.
 //!
-//! Cryptographic proof payload: `4 G1 + 8 F` (448 bytes on BLS12-381 with
-//! compressed points), plus non-cryptographic `mu` metadata.
-//!
-//! # Security caveats (see the design/soundness notes)
-//! - This implementation provides NO hiding and NO zero knowledge.
-//! - `gen_srs_for_testing` samples the trapdoors locally and is NOT a
-//!   production trusted setup.
-//! - Statistical soundness is established only in the online-extraction /
-//!   ideal-polynomial model. An AGM instantiation still needs an adaptive
-//!   two-trapdoor ideal-check lemma; a standard-model proof still needs the
-//!   OnlineHomGridExt / ARSDH(2) extractor.
-//! - The Fiat-Shamir transcript below fully binds the statement, but ROM
-//!   knowledge soundness of the compiled protocol is NOT formally proved.
+//! This is research software. It does not provide hiding or zero knowledge.
+//! `gen_srs_for_testing` is exclusively a test utility and must not be used as
+//! a production trusted setup.
 
 use crate::pcs::{
     multilinear_kzg::batching::{batch_verify_internal, multi_open_internal, BatchProof},
@@ -45,48 +32,45 @@ use transcript::IOPTranscript;
 
 pub mod srs;
 
-use srs::{
-    split_exponents, NestedGridKzgProverParam, NestedGridKzgUniversalParams,
-    NestedGridKzgVerifierParam,
-};
+use srs::{split_exponents, CarinaProverParam, CarinaUniversalParams, CarinaVerifierParam};
 
-const BACKEND: &str = "NestedGridKZG";
+const BACKEND: &str = "Carina";
 
 /// Maximum number of Fiat-Shamir resampling attempts for a rejected challenge.
 const MAX_CHALLENGE_RETRY: usize = 64;
 
 // Transcript labels.
-const DS: &[u8] = b"nested-grid-kzg-v1";
-const LABEL_VERSION: &[u8] = b"nrg::version";
-const LABEL_MU: &[u8] = b"nrg::mu";
-const LABEL_ML: &[u8] = b"nrg::m_left";
-const LABEL_MR: &[u8] = b"nrg::m_right";
-const LABEL_CF: &[u8] = b"nrg::cm_f";
-const LABEL_POINT: &[u8] = b"nrg::point";
-const LABEL_VALUE: &[u8] = b"nrg::value";
-const LABEL_CM_S0: &[u8] = b"nrg::cm_s0";
-const LABEL_R: &[u8] = b"nrg::r";
-const LABEL_A_PLUS: &[u8] = b"nrg::a_plus";
-const LABEL_A_MINUS: &[u8] = b"nrg::a_minus";
-const LABEL_T0_PLUS: &[u8] = b"nrg::t0_plus";
-const LABEL_LAMBDA: &[u8] = b"nrg::lambda";
-const LABEL_CM_S1: &[u8] = b"nrg::cm_s1";
-const LABEL_S: &[u8] = b"nrg::s";
-const LABEL_V_PP: &[u8] = b"nrg::v_pp";
-const LABEL_V_PN: &[u8] = b"nrg::v_pn";
-const LABEL_V_NP: &[u8] = b"nrg::v_np";
-const LABEL_V_NN: &[u8] = b"nrg::v_nn";
-const LABEL_T1_PLUS: &[u8] = b"nrg::t1_plus";
-const LABEL_ETA: &[u8] = b"nrg::eta";
+const DS: &[u8] = b"carina-v1";
+const LABEL_VERSION: &[u8] = b"carina::version";
+const LABEL_MU: &[u8] = b"carina::mu";
+const LABEL_ML: &[u8] = b"carina::m_left";
+const LABEL_MR: &[u8] = b"carina::m_right";
+const LABEL_CF: &[u8] = b"carina::cm_f";
+const LABEL_POINT: &[u8] = b"carina::point";
+const LABEL_VALUE: &[u8] = b"carina::value";
+const LABEL_CM_S0: &[u8] = b"carina::cm_s0";
+const LABEL_R: &[u8] = b"carina::r";
+const LABEL_A_PLUS: &[u8] = b"carina::a_plus";
+const LABEL_A_MINUS: &[u8] = b"carina::a_minus";
+const LABEL_T0_PLUS: &[u8] = b"carina::t0_plus";
+const LABEL_LAMBDA: &[u8] = b"carina::lambda";
+const LABEL_CM_S1: &[u8] = b"carina::cm_s1";
+const LABEL_S: &[u8] = b"carina::s";
+const LABEL_V_PP: &[u8] = b"carina::v_pp";
+const LABEL_V_PN: &[u8] = b"carina::v_pn";
+const LABEL_V_NP: &[u8] = b"carina::v_np";
+const LABEL_V_NN: &[u8] = b"carina::v_nn";
+const LABEL_T1_PLUS: &[u8] = b"carina::t1_plus";
+const LABEL_ETA: &[u8] = b"carina::eta";
 
-/// NRG-KZG scheme handle.
-pub struct NestedGridKzgPCS<E: Pairing> {
+/// Carina scheme handle.
+pub struct CarinaPCS<E: Pairing> {
     phantom: PhantomData<E>,
 }
 
-/// NRG-KZG opening proof: 4 G1 elements + 8 field elements (+ `mu` metadata).
+/// Carina opening proof: 4 G1 elements + 8 field elements (+ `mu` metadata).
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct NestedGridKzgProof<E: Pairing> {
+pub struct CarinaProof<E: Pairing> {
     /// `C_0 = [S_0(tau)]_1`.
     pub cm_s0: E::G1Affine,
     /// `C_1 = [S_1(sigma)]_1`.
@@ -115,7 +99,7 @@ pub struct NestedGridKzgProof<E: Pairing> {
     pub mu: u32,
 }
 
-impl<E: Pairing> NestedGridKzgProof<E> {
+impl<E: Pairing> CarinaProof<E> {
     /// Cryptographic payload size in bytes: `4 * |G1_compressed| + 8 * |F|`.
     pub fn cryptographic_payload_bytes(&self) -> usize {
         4 * self.cm_s0.compressed_size() + 8 * self.a_plus.compressed_size()
@@ -126,19 +110,19 @@ impl<E: Pairing> NestedGridKzgProof<E> {
 // PolynomialCommitmentScheme trait
 // ════════════════════════════════════════════════════════════════════
 
-impl<E: Pairing> PolynomialCommitmentScheme<E> for NestedGridKzgPCS<E> {
-    type ProverParam = NestedGridKzgProverParam<E>;
-    type VerifierParam = NestedGridKzgVerifierParam<E>;
-    type SRS = NestedGridKzgUniversalParams<E>;
+impl<E: Pairing> PolynomialCommitmentScheme<E> for CarinaPCS<E> {
+    type ProverParam = CarinaProverParam<E>;
+    type VerifierParam = CarinaVerifierParam<E>;
+    type SRS = CarinaUniversalParams<E>;
     type Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>;
     type Point = Vec<E::ScalarField>;
     type Evaluation = E::ScalarField;
     type Commitment = Commitment<E>;
-    type Proof = NestedGridKzgProof<E>;
+    type Proof = CarinaProof<E>;
     type BatchProof = BatchProof<E, Self>;
 
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, nv: usize) -> Result<Self::SRS, PCSError> {
-        NestedGridKzgUniversalParams::<E>::gen_srs_for_testing(rng, nv)
+        CarinaUniversalParams::<E>::gen_srs_for_testing(rng, nv)
     }
 
     fn trim(
@@ -238,7 +222,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for NestedGridKzgPCS<E> {
         value: &E::ScalarField,
         proof: &Self::Proof,
     ) -> Result<bool, PCSError> {
-        nested_grid_verify(vp, com, point, value, proof)
+        carina_verify(vp, com, point, value, proof)
     }
 
     fn batch_verify(
@@ -258,17 +242,17 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for NestedGridKzgPCS<E> {
     }
 }
 
-impl<E: Pairing> NestedGridKzgPCS<E> {
+impl<E: Pairing> CarinaPCS<E> {
     /// Core opening using an already-computed commitment. This avoids the
     /// statement recommitment cost incurred by the `PolynomialCommitmentScheme`
     /// trait `open`, and is what benchmarks label `core_open`.
     pub fn open_with_commitment(
-        pp: &NestedGridKzgProverParam<E>,
+        pp: &CarinaProverParam<E>,
         poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
         point: &[E::ScalarField],
         commitment: &Commitment<E>,
-    ) -> Result<(NestedGridKzgProof<E>, E::ScalarField), PCSError> {
-        nested_grid_open(pp, poly, point, commitment)
+    ) -> Result<(CarinaProof<E>, E::ScalarField), PCSError> {
+        carina_open(pp, poly, point, commitment)
     }
 }
 
@@ -280,7 +264,7 @@ impl<E: Pairing> NestedGridKzgPCS<E> {
 fn check_mu(mu: usize) -> Result<(), PCSError> {
     if mu < 4 {
         return Err(PCSError::InvalidParameters(format!(
-            "nested-grid-kzg requires mu >= 4, got {}",
+            "carina requires mu >= 4, got {}",
             mu
         )));
     }
@@ -296,7 +280,7 @@ fn check_mu(mu: usize) -> Result<(), PCSError> {
 /// Reorder canonical evaluations `F[i + M_L*j]` into the dominant-QX-first
 /// layout so a single prefix MSM commits the bivariate twin.
 fn layout_scalars<E: Pairing>(
-    pp: &NestedGridKzgProverParam<E>,
+    pp: &CarinaProverParam<E>,
     evals: &[E::ScalarField],
 ) -> Vec<E::ScalarField> {
     let big_ml = pp.big_ml();
@@ -478,12 +462,12 @@ fn draw_reciprocal<F: PrimeField>(
 // ════════════════════════════════════════════════════════════════════
 
 #[allow(clippy::too_many_lines)]
-fn nested_grid_open<E: Pairing>(
-    pp: &NestedGridKzgProverParam<E>,
+fn carina_open<E: Pairing>(
+    pp: &CarinaProverParam<E>,
     poly: &Arc<DenseMultilinearExtension<E::ScalarField>>,
     point: &[E::ScalarField],
     commitment: &Commitment<E>,
-) -> Result<(NestedGridKzgProof<E>, E::ScalarField), PCSError> {
+) -> Result<(CarinaProof<E>, E::ScalarField), PCSError> {
     let mu = poly.num_vars;
     check_mu(mu)?;
     let (m_left, m_right) = split_exponents(mu);
@@ -786,7 +770,7 @@ fn nested_grid_open<E: Pairing>(
         pp.msm_collected(&indices, &scalars)?
     };
 
-    let proof = NestedGridKzgProof {
+    let proof = CarinaProof {
         cm_s0,
         cm_s1,
         pi_x,
@@ -883,12 +867,12 @@ fn compute_restrictions<E: Pairing>(
 // Verifier
 // ════════════════════════════════════════════════════════════════════
 
-fn nested_grid_verify<E: Pairing>(
-    vp: &NestedGridKzgVerifierParam<E>,
+fn carina_verify<E: Pairing>(
+    vp: &CarinaVerifierParam<E>,
     com: &Commitment<E>,
     point: &[E::ScalarField],
     value: &E::ScalarField,
-    proof: &NestedGridKzgProof<E>,
+    proof: &CarinaProof<E>,
 ) -> Result<bool, PCSError> {
     // ── integrity checks before any shift / allocation ──
     let mu = proof.mu as usize;

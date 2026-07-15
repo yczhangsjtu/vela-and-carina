@@ -6,6 +6,10 @@
 
 //! Prelude
 pub use crate::pcs::{
+    carina::{
+        srs::{CarinaProverParam, CarinaUniversalParams, CarinaVerifierParam},
+        CarinaPCS, CarinaProof,
+    },
     chopin::{
         srs::{ChopinProverParam, ChopinUniversalParams, ChopinVerifierParam},
         ChopinMsmLengths, ChopinPCS, ChopinProof,
@@ -21,20 +25,12 @@ pub use crate::pcs::{
     },
     mulcs::{
         srs::{MulcsProverParam, MulcsUniversalParams, MulcsVerifierParam},
-        MulcsPCS, MulcsProof, MulcsSymmetricPCS, MulcsSymmetricProof,
+        MulcsPCS, MulcsProof,
     },
     multilinear_kzg::{
         batching::BatchProof,
         srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam},
         MultilinearKzgPCS, MultilinearKzgProof,
-    },
-    nested_grid_kzg::{
-        srs::{NestedGridKzgProverParam, NestedGridKzgUniversalParams, NestedGridKzgVerifierParam},
-        NestedGridKzgPCS, NestedGridKzgProof,
-    },
-    recipcs::{
-        srs::{ReciProverParam, ReciUniversalParams, ReciVerifierParam},
-        ReciPCS, ReciProof,
     },
     samaritan::{
         srs::{SamaritanProverParam, SamaritanUniversalParams, SamaritanVerifierParam},
@@ -44,6 +40,10 @@ pub use crate::pcs::{
     univariate_kzg::{
         srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam},
         UnivariateKzgBatchProof, UnivariateKzgPCS, UnivariateKzgProof,
+    },
+    vela::{
+        srs::{VelaProverParam, VelaUniversalParams, VelaVerifierParam},
+        VelaPCS, VelaProof,
     },
     zeromorph::{
         srs::{ZeromorphProverParam, ZeromorphUniversalParams, ZeromorphVerifierParam},

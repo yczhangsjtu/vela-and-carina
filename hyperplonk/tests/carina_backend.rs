@@ -1,7 +1,7 @@
-//! HyperPlonk + NestedGridKzgPCS backend correctness tests.
+//! HyperPlonk + CarinaPCS backend correctness tests.
 //!
 //! Run with:
-//!   cargo test -p hyperplonk --test nested_grid_kzg_backend -- --nocapture
+//!   cargo test -p hyperplonk --test carina_backend -- --nocapture
 
 #[cfg(test)]
 mod tests {
@@ -14,7 +14,7 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                GeminiPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS,
+                CarinaPCS, GeminiPCS, MultilinearKzgPCS, SamaritanPCS, VelaPCS, ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -25,50 +25,48 @@ mod tests {
     type FrType = Fr;
 
     #[test]
-    fn test_hyperplonk_nested_grid_kzg_e2e() -> Result<(), HyperPlonkErrors> {
+    fn test_hyperplonk_carina_e2e() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let gates = CustomizedGates::vanilla_plonk_gate();
-        let pcs_srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
+        let pcs_srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 12)?;
 
         for nv in [4usize, 5, 6] {
             let size = 1 << nv;
             let circuit = MockCircuit::<FrType>::new(size, &gates);
             assert!(circuit.is_satisfied(), "circuit not satisfied at nv={nv}");
 
-            let (pk, vk) =
-                <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::preprocess(
-                    &circuit.index,
-                    &pcs_srs,
-                )?;
-            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::prove(
+            let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::preprocess(
+                &circuit.index,
+                &pcs_srs,
+            )?;
+            let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
             )?;
-            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::verify(
+            let ok = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
             )?;
-            assert!(ok, "HyperPlonk+NestedGridKZG verify failed at nv={nv}");
+            assert!(ok, "HyperPlonk+Carina verify failed at nv={nv}");
         }
         Ok(())
     }
 
     #[test]
-    fn test_hyperplonk_nested_grid_kzg_rejects_tampered_public_input(
-    ) -> Result<(), HyperPlonkErrors> {
+    fn test_hyperplonk_carina_rejects_tampered_public_input() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
         let gates = CustomizedGates::vanilla_plonk_gate();
-        let pcs_srs = NestedGridKzgPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let pcs_srs = CarinaPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let nv = 5;
         let size = 1 << nv;
         let circuit = MockCircuit::<FrType>::new(size, &gates);
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::preprocess(
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::preprocess(
             &circuit.index,
             &pcs_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
@@ -76,7 +74,7 @@ mod tests {
         let mut bad_inputs = circuit.public_inputs.clone();
         if !bad_inputs.is_empty() {
             bad_inputs[0] += Fr::from(1u64);
-            let res = <PolyIOP<FrType> as HyperPlonkSNARK<E, NestedGridKzgPCS<E>>>::verify(
+            let res = <PolyIOP<FrType> as HyperPlonkSNARK<E, CarinaPCS<E>>>::verify(
                 &vk,
                 &bad_inputs,
                 &proof,
@@ -91,7 +89,7 @@ mod tests {
 
     // Cross-backend correctness: the same circuit is provable and verifiable
     // under every PCS backend in the tree, giving independent confidence in
-    // the NestedGridKZG integration.
+    // the Carina integration.
     #[test]
     fn test_hyperplonk_cross_backend_all() -> Result<(), HyperPlonkErrors> {
         let mut rng = test_rng();
@@ -126,8 +124,8 @@ mod tests {
         run_backend!(ZeromorphPCS<E>, "Zeromorph");
         run_backend!(SamaritanPCS<E>, "Samaritan");
         run_backend!(GeminiPCS<E>, "Gemini");
-        run_backend!(ReciPCS<E>, "ReciPCS");
-        run_backend!(NestedGridKzgPCS<E>, "NestedGridKZG");
+        run_backend!(VelaPCS<E>, "Vela");
+        run_backend!(CarinaPCS<E>, "Carina");
         Ok(())
     }
 }

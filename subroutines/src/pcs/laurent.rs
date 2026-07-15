@@ -1,6 +1,6 @@
 //! Shared reciprocal / symmetric-Laurent kernel.
 //!
-//! Both [`crate::pcs::recipcs`] and [`crate::pcs::mercury`] rely on the same
+//! Both [`crate::pcs::vela`] and [`crate::pcs::mercury`] rely on the same
 //! FFT-free structured multiplication of a polynomial by the reciprocal of a
 //! tensor-product ("eq"/Lagrange) polynomial. Rather than keep two nearly
 //! identical private copies, the formula lives here once.
@@ -37,7 +37,7 @@ pub(crate) fn laurent_offset(m: usize) -> usize {
 /// the coefficient of `X^d`, `d in -(N-1)..=(N-1)`.
 pub(crate) fn mul_by_reciprocal_tensor<F: Field>(coeffs: &[F], m: usize, r: &[F]) -> Vec<F> {
     let n = 1usize << m;
-    // Length invariants required by the algorithm. Callers (ReciPCS, Mercury)
+    // Length invariants required by the algorithm. Callers (VelaPCS, Mercury)
     // always pass exactly-sized buffers; these assertions document and guard the
     // contract so a mis-sized internal call fails loudly in debug/test builds
     // rather than silently reading out of range or producing a wrong result.

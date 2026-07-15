@@ -4,10 +4,10 @@
 // You should have received a copy of the MIT License
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
-use std::{fs::File, io, time::Instant};
+use std::{fs::File, time::Instant};
 
 use ark_bls12_381::{Bls12_381, Fr};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Write};
+use ark_serialize::Write;
 use ark_std::test_rng;
 use hyperplonk::{
     prelude::{CustomizedGates, HyperPlonkErrors, MockCircuit},
@@ -47,16 +47,6 @@ fn main() -> Result<(), HyperPlonkErrors> {
     println!();
 
     Ok(())
-}
-
-fn read_srs() -> Result<MultilinearUniversalParams<Bls12_381>, io::Error> {
-    let mut f = File::open("srs.params")?;
-    Ok(MultilinearUniversalParams::<Bls12_381>::deserialize_compressed_unchecked(&mut f).unwrap())
-}
-
-fn write_srs(pcs_srs: &MultilinearUniversalParams<Bls12_381>) {
-    let mut f = File::create("srs.params").unwrap();
-    pcs_srs.serialize_uncompressed(&mut f).unwrap();
 }
 
 fn bench_vanilla_plonk(

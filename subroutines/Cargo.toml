@@ -30,11 +30,6 @@ criterion = "0.5.1"
 
 # Benchmarks
 [[bench]]
-name = "pcs-benches"
-path = "benches/pcs_bench.rs"
-harness = false
-
-[[bench]]
 name = "group-ops-benches"
 path = "benches/group_ops_bench.rs"
 harness = false
@@ -42,26 +37,6 @@ harness = false
 [[bench]]
 name = "pcs-single-verify-benches"
 path = "benches/pcs_single_verify_bench.rs"
-harness = false
-
-[[bench]]
-name = "recipcs-benches"
-path = "benches/recipcs_bench.rs"
-harness = false
-
-[[bench]]
-name = "nested-grid-kzg-benches"
-path = "benches/nested_grid_kzg_bench.rs"
-harness = false
-
-[[bench]]
-name = "mercury-benches"
-path = "benches/mercury_bench.rs"
-harness = false
-
-[[bench]]
-name = "chopin-benches"
-path = "benches/chopin_bench.rs"
 harness = false
 
 [[bin]]

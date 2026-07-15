@@ -1,6 +1,6 @@
-//! Structured reference string for ReciPCS.
+//! Structured reference string for VelaPCS.
 //!
-//! ReciPCS uses a plain univariate KZG reference string:
+//! VelaPCS uses a plain univariate KZG reference string:
 //!   - G1 powers [1]_1, [tau]_1, ..., [tau^{N-1}]_1   (degree bound N-1)
 //!   - three G2 elements [1]_2, [tau]_2, [tau^2]_2
 //!
@@ -21,16 +21,16 @@ use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{format, rand::Rng, string::ToString, vec::Vec, One, UniformRand};
 
-/// Universal parameters for ReciPCS.
+/// Universal parameters for VelaPCS.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct ReciUniversalParams<E: Pairing> {
-    pub prover_param: ReciProverParam<E>,
-    pub verifier_param: ReciVerifierParam<E>,
+pub struct VelaUniversalParams<E: Pairing> {
+    pub prover_param: VelaProverParam<E>,
+    pub verifier_param: VelaVerifierParam<E>,
 }
 
 /// Prover parameters: G1 powers for MSM plus the three verifier G2 elements.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct ReciProverParam<E: Pairing> {
+pub struct VelaProverParam<E: Pairing> {
     /// [tau^0]_1 ..= [tau^{max_degree}]_1
     pub g1_powers: Vec<E::G1Affine>,
     pub g2_one: E::G2Affine,
@@ -41,7 +41,7 @@ pub struct ReciProverParam<E: Pairing> {
 
 /// Verifier parameters: minimal G1/G2 elements.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct ReciVerifierParam<E: Pairing> {
+pub struct VelaVerifierParam<E: Pairing> {
     pub g1_one: E::G1Affine,
     pub g1_tau: E::G1Affine,
     pub g2_one: E::G2Affine,
@@ -50,7 +50,7 @@ pub struct ReciVerifierParam<E: Pairing> {
     pub max_degree: usize,
 }
 
-impl<E: Pairing> ReciProverParam<E> {
+impl<E: Pairing> VelaProverParam<E> {
     /// Commit to a univariate polynomial (given by its coefficients) via MSM.
     pub fn commit(&self, coeffs: &[E::ScalarField]) -> Result<E::G1Affine, PCSError> {
         if coeffs.len() > self.g1_powers.len() {
@@ -65,9 +65,9 @@ impl<E: Pairing> ReciProverParam<E> {
     }
 }
 
-impl<E: Pairing> StructuredReferenceString<E> for ReciUniversalParams<E> {
-    type ProverParam = ReciProverParam<E>;
-    type VerifierParam = ReciVerifierParam<E>;
+impl<E: Pairing> StructuredReferenceString<E> for VelaUniversalParams<E> {
+    type ProverParam = VelaProverParam<E>;
+    type VerifierParam = VelaVerifierParam<E>;
 
     fn extract_prover_param(&self, _supported_size: usize) -> Self::ProverParam {
         self.prover_param.clone()
@@ -87,14 +87,14 @@ impl<E: Pairing> StructuredReferenceString<E> for ReciUniversalParams<E> {
                 supported_size, self.prover_param.max_degree
             )));
         }
-        let ck = ReciProverParam {
+        let ck = VelaProverParam {
             g1_powers: self.prover_param.g1_powers[..=supported_size].to_vec(),
             g2_one: self.prover_param.g2_one,
             g2_tau: self.prover_param.g2_tau,
             g2_tau2: self.prover_param.g2_tau2,
             max_degree: supported_size,
         };
-        let vk = ReciVerifierParam {
+        let vk = VelaVerifierParam {
             g1_one: self.prover_param.g1_powers[0],
             g1_tau: self.prover_param.g1_powers[1],
             g2_one: self.verifier_param.g2_one,
@@ -144,14 +144,14 @@ impl<E: Pairing> StructuredReferenceString<E> for ReciUniversalParams<E> {
         let g2_tau = (g2 * tau).into_affine();
         let g2_tau2 = (g2 * tau * tau).into_affine();
 
-        let pp = ReciProverParam {
+        let pp = VelaProverParam {
             g1_powers,
             g2_one,
             g2_tau,
             g2_tau2,
             max_degree,
         };
-        let vp = ReciVerifierParam {
+        let vp = VelaVerifierParam {
             g1_one: pp.g1_powers[0],
             g1_tau: pp.g1_powers[1],
             g2_one,
@@ -159,7 +159,7 @@ impl<E: Pairing> StructuredReferenceString<E> for ReciUniversalParams<E> {
             g2_tau2,
             max_degree,
         };
-        Ok(ReciUniversalParams {
+        Ok(VelaUniversalParams {
             prover_param: pp,
             verifier_param: vp,
         })
@@ -173,10 +173,10 @@ mod tests {
     use ark_std::test_rng;
 
     #[test]
-    fn test_recipcs_srs_shape() -> Result<(), PCSError> {
+    fn test_vela_srs_shape() -> Result<(), PCSError> {
         let mut rng = test_rng();
         for nv in 2..8 {
-            let srs = ReciUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
+            let srs = VelaUniversalParams::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
             let n = 1usize << nv;
             // tight degree bound: exactly N powers (0..=N-1)
             assert_eq!(srs.prover_param.g1_powers.len(), n);

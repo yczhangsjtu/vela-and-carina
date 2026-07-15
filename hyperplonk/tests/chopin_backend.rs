@@ -13,8 +13,8 @@ mod tests {
     use subroutines::{
         pcs::{
             prelude::{
-                ChopinPCS, GeminiPCS, MercuryPCS, MultilinearKzgPCS, NestedGridKzgPCS, ReciPCS,
-                SamaritanPCS, ZeromorphPCS,
+                CarinaPCS, ChopinPCS, GeminiPCS, MercuryPCS, MultilinearKzgPCS, SamaritanPCS,
+                VelaPCS, ZeromorphPCS,
             },
             PolynomialCommitmentScheme,
         },
@@ -119,10 +119,10 @@ mod tests {
 
         run_backend!(MultilinearKzgPCS<E>, "mKZG");
         run_backend!(GeminiPCS<E>, "Gemini");
-        run_backend!(ReciPCS<E>, "ReciPCS");
+        run_backend!(VelaPCS<E>, "Vela");
         run_backend!(ZeromorphPCS<E>, "Zeromorph");
         run_backend!(SamaritanPCS<E>, "Samaritan");
-        run_backend!(NestedGridKzgPCS<E>, "NestedGridKZG");
+        run_backend!(CarinaPCS<E>, "Carina");
         run_backend!(MercuryPCS<E>, "Mercury");
         run_backend!(ChopinPCS<E>, "Chopin");
         Ok(())

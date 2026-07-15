@@ -12,7 +12,7 @@ mod tests {
     };
     use subroutines::{
         pcs::{
-            prelude::{MulcsPCS, MultilinearKzgPCS, ReciPCS, SamaritanPCS, ZeromorphPCS},
+            prelude::{MulcsPCS, MultilinearKzgPCS, SamaritanPCS, VelaPCS, ZeromorphPCS},
             PolynomialCommitmentScheme,
         },
         poly_iop::PolyIOP,
@@ -65,7 +65,7 @@ mod tests {
 
         let mkzg_srs = MultilinearKzgPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let claymore_srs = MulcsPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
-        let reci_srs = ReciPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let vela_srs = VelaPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let zm_srs = ZeromorphPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
         let sam_srs = SamaritanPCS::<E>::gen_srs_for_testing(&mut rng, 10)?;
 
@@ -110,23 +110,23 @@ mod tests {
             "Mulcs Claymore backend verify failed"
         );
 
-        // ReciPCS (the canonical symmetric reciprocal construction)
-        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::preprocess(
+        // Vela
+        let (pk, vk) = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::preprocess(
             &circuit.index,
-            &reci_srs,
+            &vela_srs,
         )?;
-        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::prove(
+        let proof = <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::prove(
             &pk,
             &circuit.public_inputs,
             &circuit.witnesses,
         )?;
         assert!(
-            <PolyIOP<FrType> as HyperPlonkSNARK<E, ReciPCS<E>>>::verify(
+            <PolyIOP<FrType> as HyperPlonkSNARK<E, VelaPCS<E>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
             )?,
-            "ReciPCS backend verify failed"
+            "VelaPCS backend verify failed"
         );
 
         // Zeromorph

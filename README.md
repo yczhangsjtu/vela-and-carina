@@ -1,70 +1,87 @@
-# Hyperplonk library
-A linear-time FFT-free SNARK proof system (https://eprint.iacr.org/2022/1355.pdf).
+# Vela and Carina
 
-## Disclaimer
+This repository accompanies the paper *Vela and Carina: Pairing-Based
+Multilinear Polynomial Commitments with Complementary Trade-offs*. It contains
+Rust implementations of two pairing-based multilinear polynomial commitment
+schemes (MLPCSs), together with a HyperPlonk integration and comparable
+research implementations of several published PCS baselines.
 
-**DISCLAIMER:** This software is provided "as is" and its security has not been externally audited. Use at your own risk.
+- **Vela** targets compact proofs and fast verification. Its opening proof has
+  `2 G1 + 4 F` cryptographic elements.
+- **Carina** targets prover efficiency while retaining a compact proof and a
+  low verifier cost. Its opening proof has `4 G1 + 8 F` cryptographic
+  elements.
 
-## Development environment setup
+The repository also includes mKZG, Gemini, Zeromorph, Samaritan, Mercury,
+CHOPIN, and Mulcs implementations for reproducible comparisons.
 
-### Install RUST
+## Security notice
 
-We recommend using nix for installing the correct version of rust and
-additional libraries:
+This is research software and has not received an external security audit. It
+does not provide zero knowledge or hiding. The `gen_srs_for_testing` APIs
+sample trapdoors locally and are suitable only for tests and benchmarks; a
+deployment must use an appropriate trusted or updatable setup ceremony.
+
+## Build and test
+
+Install a current stable Rust toolchain, then run from the repository root:
 
 ```bash
-> curl -L https://nixos.org/nix/install | sh
+cargo build --workspace
+cargo test --workspace
+cargo fmt -- --check
 ```
 
-### Compiling the project for the first time
+Focused PCS and HyperPlonk integration tests are available through:
 
 ```bash
-> nix-shell
-> cargo build
+cargo test -p subroutines pcs::vela
+cargo test -p subroutines pcs::carina
+cargo test -p hyperplonk --test vela_backend
+cargo test -p hyperplonk --test carina_backend
 ```
 
-### Direnv
+## Reproducible benchmarks
 
-We recommend the following tools:
+The single-opening benchmark measures setup, trimming, commitment, opening,
+and verification separately. Opening is measured with a precomputed statement
+commitment so it does not accidentally include a second size-`N` commitment.
+Each backend and dimension is executed in its own process by the matrix runner.
 
-- [nix](https://nixos.org/download.html)
-- [direnv](https://direnv.net/docs/installation.html)
+```bash
+cargo build --release -p subroutines --bin pcs_single_open_bench
 
-Run `direnv allow` at the repo root. You should see dependencies (including Rust) being installed (the first time might take a while). 
-Upon modification on `flake.nix`, run `direnv reload` to reflect new dependencies or environment setups.
+PCS_BENCH_BACKEND=vela PCS_BENCH_NV=12 \
+  target/release/pcs_single_open_bench
 
-### Tests
+PCS_BENCH_BACKENDS=vela,carina,mkzg \
+PCS_BENCH_NV_RANGE=8,12,16,20 \
+  scripts/run_pcs_single_open_matrix.sh
 
-```
-> cargo test --release --all
-```
-
-### Generate and read the documentation
-
-#### Standard
-
-```
-> cargo doc --open
+PCS_VERIFY_BACKEND=vela PCS_VERIFY_NV_RANGE=8,12,16,20 \
+  cargo bench -p subroutines --bench pcs-single-verify-benches
 ```
 
-### Code formatting
+The matrix runner is serial and writes machine-readable CSV output. Generated
+results are intentionally ignored by Git. See [docs/benchmarking.md](docs/benchmarking.md)
+for timing scope, repetition policy, and the CSV schema.
 
-To format your code run
+## Layout
 
+- `subroutines/`: PCS implementations, SRS types, and standalone benchmarks.
+- `hyperplonk/`: HyperPlonk implementation and backend integration tests.
+- `scripts/`: reproducible benchmark runner and test helpers.
+- `docs/benchmarking.md`: benchmark methodology.
+
+## Citation
+
+Please cite the accompanying paper when using Vela or Carina:
+
+```text
+Yuncong Zhang. Vela and Carina: Pairing-Based Multilinear Polynomial
+Commitments with Complementary Trade-offs. 2026.
 ```
-> cargo fmt
-```
 
-### Updating non-cargo dependencies
+## License
 
-Run `nix flake update` if you would like to pin other version edit `flake.nix`
-beforehand. Commit the lock file when happy.
-
-To update only a single input specify it as an argument, for example
-
-    nix flake update github:oxalica/rust-overlay
-
-### Benchmarks
-
-To obtain benchmarks, run the script file `scripts/run_benchmarks.sh`. 
-We refer to Table 5 and Table 6 in https://eprint.iacr.org/2022/1355.pdf for an example benchmark.
+Licensed under the [MIT License](LICENSE).
