@@ -78,8 +78,8 @@ for timing scope, repetition policy, and the CSV schema.
 Please cite the accompanying paper when using Vela or Carina:
 
 ```text
-Yuncong Zhang. Vela and Carina: Pairing-Based Multilinear Polynomial
-Commitments with Complementary Trade-offs. 2026.
+Yuncong Zhang. Vela and Carina: Fast Pairing-Based Multilinear Polynomial
+Commitments from Reciprocal Polynomials. 2026.
 ```
 
 ## License
